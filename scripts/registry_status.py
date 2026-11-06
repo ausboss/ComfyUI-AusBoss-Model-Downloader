@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 import tomllib
 import urllib.request
 
@@ -34,7 +35,12 @@ def main():
         )["project"]["version"]
         if not re.fullmatch(r"\d+\.\d+\.\d+", version):
             raise ValueError("Version must use X.Y.Z format")
-        request = urllib.request.Request(STATUS_URL, headers={"User-Agent": "AusBoss-registry-check"})
+        # The API can serve a cached empty list immediately after publication.
+        # A fresh lookup must not mistake that response for an unpublished version.
+        request = urllib.request.Request(
+            f"{STATUS_URL}&_={time.time_ns()}",
+            headers={"User-Agent": "AusBoss-registry-check", "Cache-Control": "no-cache"},
+        )
         with urllib.request.urlopen(request, timeout=30) as response:
             payload = response.read(8 * 1024 * 1024 + 1)
         if len(payload) > 8 * 1024 * 1024:
