@@ -1,0 +1,7 @@
+# Development and CI files are not needed by a ComfyUI installation.
+.github/
+tests/
+scripts/
+requirements-dev.txt
+.gitignore
+.comfyignore

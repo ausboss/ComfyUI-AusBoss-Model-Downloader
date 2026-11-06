@@ -34,4 +34,6 @@ For frontend changes, check the actual ComfyUI canvas in Classic and Nodes 2.0: 
 - Preserve the serialized node ID and model-list format. Chain frontend lifecycle callbacks and dispose observers/listeners.
 - Refresh vendored UI modules deliberately; see [shared-components.md](docs/shared-components.md).
 
-GitHub Actions runs offline checks only. There is no automatic Registry publication workflow in this repository.
+GitHub Actions runs offline tests and checks the Registry archive. Publishing is a separate, manually started job in [ComfyUI-AusBoss](https://github.com/ausboss/ComfyUI-AusBoss/actions/workflows/publish_model_downloader.yml), where the AusBoss publisher credential is configured. It checks out an exact commit of this addon and validates its package before uploading. Ordinary pushes do not publish a Registry version.
+
+The Registry ID is `ausboss-model-downloader`. Release versions are immutable. Check `python scripts/registry_status.py --report` after a submission; only `NodeVersionStatusActive` means approved. Do not upload again just because a version is Pending or Flagged.
