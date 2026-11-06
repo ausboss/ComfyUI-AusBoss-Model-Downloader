@@ -1,0 +1,174 @@
+import asyncio
+import hashlib
+import json
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from downloader.policy import (DownloadError, MODEL_EXTENSIONS, ModelFolders, auth_headers,
+                               clean_rows, model_filename, source_url, suggested_folder, transfer_url)
+from downloader.service import DownloadService, LocalStore
+
+
+class PolicyTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.models = self.root / 'models'
+        self.extra = self.root / 'extra'
+        self.models.mkdir(); self.extra.mkdir()
+        self.folders = ModelFolders({'loras': ([str(self.models), str(self.extra)], MODEL_EXTENSIONS),
+                                    'custom_nodes': ([str(self.root / 'custom_nodes')], MODEL_EXTENSIONS),
+                                    'configs': ([str(self.root / 'configs')], {'.yaml'})})
+
+    def test_only_registered_model_folders(self):
+        self.assertEqual(self.folders.names(), ['loras'])
+        for folder in ['custom_nodes', 'configs', 'missing', '../loras']:
+            with self.subTest(folder=folder), self.assertRaises(DownloadError):
+                self.folders.target(folder, '', 'model.safetensors')
+
+    def test_traversal_and_windows_paths_refused(self):
+        for part in ['../escape', '/tmp', 'C:\\Windows', 'a/../../b', 'a\\..\\b', 'custom_nodes', 'a/custom_nodes', 'a:stream', 'NUL']:
+            with self.subTest(part=part), self.assertRaises(DownloadError):
+                self.folders.target('loras', part, 'model.safetensors')
+
+    def test_symlink_escape_refused(self):
+        (self.models / 'escape').symlink_to(self.extra, target_is_directory=True)
+        with self.assertRaises(DownloadError):
+            self.folders.target('loras', 'escape', 'model.safetensors')
+
+    def test_code_file_extensions_refused(self):
+        for name in ['startup.py', 'thing.js', 'archive.zip', 'model.safetensors.py', '../model.pt', 'model.pt:code', 'CON.bin']:
+            with self.subTest(name=name), self.assertRaises(DownloadError):
+                model_filename(name)
+        for extension in MODEL_EXTENSIONS:
+            self.assertEqual(model_filename('model' + extension), 'model' + extension)
+
+    def test_custom_nodes_registered_as_model_root_refused(self):
+        self.folders.registered['loras'] = ([str(self.root / 'custom_nodes' / 'sub')], MODEL_EXTENSIONS)
+        with self.assertRaises(DownloadError):
+            self.folders.target('loras', '', 'model.pt')
+
+    def test_existing_secondary_path_and_nested(self):
+        (self.extra / 'style').mkdir()
+        (self.extra / 'style/model.safetensors').write_bytes(b'model')
+        self.assertEqual(self.folders.existing('loras', '', 'model.safetensors')[1], 'style/model.safetensors')
+
+    def test_existing_outside_symlink_ignored(self):
+        outside = self.root / 'outside.safetensors'; outside.write_bytes(b'model')
+        (self.models / 'model.safetensors').symlink_to(outside)
+        self.assertIsNone(self.folders.existing('loras', '', 'model.safetensors'))
+
+    def test_tokens_only_exact_provider_host(self):
+        keys = {'civitai': 'test-civ', 'huggingface': 'test-hf'}
+        self.assertEqual(auth_headers('https://civitai.com/api/download/models/1', keys)['Authorization'], 'Bearer test-civ')
+        self.assertEqual(auth_headers('https://huggingface.co/a/b', keys)['Authorization'], 'Bearer test-hf')
+        for url in ['https://cdn.huggingface.co/a', 'https://civitai.com.evil.test/a', 'https://evil.test/?huggingface.co', 'https://cdn-lfs.hf.co/a']:
+            self.assertEqual(auth_headers(url, keys), {})
+
+    def test_url_credentials_and_untrusted_hosts_refused(self):
+        for url in ['http://huggingface.co/a/b', 'https://127.0.0.1/a', 'https://civitai.com.evil.test/a',
+                    'https://u:p@civitai.com/a', 'https://civitai.com/a?token=secret', 'https://huggingface.co/a/b?access_token=secret']:
+            with self.subTest(url=url), self.assertRaises(DownloadError): source_url(url)
+        for url in ['http://cdn-lfs.hf.co/a', 'https://127.0.0.1/a', 'https://evil.test/a', 'https://civitai.com/a']:
+            with self.subTest(url=url), self.assertRaises(DownloadError): transfer_url(url, 'huggingface')
+
+    def test_model_mapping(self):
+        for kind, folder in [('LORA', 'loras'), ('Checkpoint', 'checkpoints'), ('VAE', 'vae'), ('Controlnet', 'controlnet')]:
+            self.assertEqual(suggested_folder(kind), folder)
+        self.assertEqual(suggested_folder(path='split_files/text_encoders/a.safetensors'), 'text_encoders')
+
+    def test_presets_drop_tokens_and_private_state(self):
+        rows = clean_rows([{'url': 'https://huggingface.co/a/b', 'civitai_token': 'secret', 'job': 'private'}])
+        self.assertNotIn('secret', json.dumps(rows)); self.assertNotIn('job', rows[0])
+        store = LocalStore(self.root / 'settings')
+        store.save_keys({'huggingface': 'test-key'})
+        self.assertEqual(store.key_status(), {'huggingface': True, 'civitai': False})
+        self.assertEqual((self.root / 'settings/keys.json').stat().st_mode & 0o777, 0o600)
+        store.save_preset('../../name', rows)
+        self.assertTrue((self.root / 'settings/presets.json').exists())
+        self.assertFalse((self.root / 'name.json').exists())
+
+
+class FakeContent:
+    async def iter_chunked(self, n):
+        yield b'model-bytes'
+
+
+class FakeResponse:
+    headers = {'Content-Length': '11', 'Content-Type': 'application/octet-stream'}
+    content = FakeContent()
+    def close(self): pass
+
+
+class FakeClient:
+    def __init__(self, keys): pass
+    async def __aenter__(self): return self
+    async def __aexit__(self, *args): pass
+    async def resolve(self, url):
+        return {'files': [{'filename': 'model.safetensors', 'url': url, 'size': 11,
+                           'sha256': hashlib.sha256(b'model-bytes').hexdigest(), 'provider': 'huggingface'}]}
+    async def response(self, url, provider): return FakeResponse()
+
+
+class ServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name); self.models = self.root / 'models'; self.models.mkdir()
+        self.service = DownloadService(ModelFolders({'loras': ([str(self.models)], MODEL_EXTENSIONS)}), self.root / 'settings')
+        self.row = {'url': 'https://huggingface.co/a/b/resolve/main/model.safetensors', 'filename': 'model.safetensors', 'folder': 'loras', 'subfolder': 'style'}
+
+    async def finish(self, job):
+        task = self.service.tasks.get(job['id'])
+        if task: await task
+        return self.service.status('user', job['id'])
+
+    async def test_transfer_atomic_and_deduplicated(self):
+        with patch('downloader.service.ProviderClient', FakeClient):
+            job = self.service.start('user', self.row)
+            self.assertEqual(self.service.start('user', self.row)['id'], job['id'])
+            result = await self.finish(job)
+        self.assertEqual(result['state'], 'installed', result)
+        self.assertEqual((self.models / 'style/model.safetensors').read_bytes(), b'model-bytes')
+        self.assertFalse(list(self.models.rglob('*.part')))
+        self.assertEqual((await self.service.check('user', self.row))['state'], 'installed')
+
+    async def test_existing_never_overwritten(self):
+        (self.models / 'model.safetensors').write_bytes(b'original')
+        with patch('downloader.service.ProviderClient', FakeClient):
+            result = await self.finish(self.service.start('user', self.row))
+        self.assertEqual(result['state'], 'installed')
+        self.assertEqual((self.models / 'model.safetensors').read_bytes(), b'original')
+
+    async def test_hash_failure_does_not_install(self):
+        class Bad(FakeClient):
+            async def resolve(self, url):
+                result = await super().resolve(url); result['files'][0]['sha256'] = '0' * 64; return result
+        with patch('downloader.service.ProviderClient', Bad):
+            result = await self.finish(self.service.start('user', self.row))
+        self.assertEqual(result['state'], 'error'); self.assertIn('SHA256', result['message'])
+        self.assertFalse(list(self.models.rglob('*.safetensors'))); self.assertFalse(list(self.models.rglob('*.part')))
+
+    async def test_job_ownership_and_cancel(self):
+        with patch('downloader.service.ProviderClient', FakeClient):
+            await self.service.slot.acquire()
+            job = self.service.start('user', self.row)
+            await asyncio.sleep(0)
+            with self.assertRaises(DownloadError): self.service.status('other', job['id'])
+            self.service.cancel('user', job['id'])
+            result = await self.finish(job)
+            self.service.slot.release()
+        self.assertEqual(result['state'], 'cancelled')
+        self.assertFalse(list(self.models.rglob('*.part')))
+
+    async def test_public_error_never_contains_network_secret(self):
+        class Bad(FakeClient):
+            async def resolve(self, url): raise RuntimeError('https://host/path?token=SECRET')
+        with patch('downloader.service.ProviderClient', Bad):
+            result = await self.finish(self.service.start('user', self.row))
+        self.assertEqual(result['state'], 'error'); self.assertNotIn('SECRET', json.dumps(result))
+
+
+if __name__ == '__main__': unittest.main()
