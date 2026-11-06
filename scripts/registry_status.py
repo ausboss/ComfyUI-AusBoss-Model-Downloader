@@ -9,6 +9,7 @@ import re
 import sys
 import time
 import tomllib
+import urllib.error
 import urllib.request
 
 NODE_ID = "ausboss-model-downloader"
@@ -23,6 +24,17 @@ STATUSES = {
 }
 
 
+def fetch_json(url):
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "AusBoss-registry-check", "Cache-Control": "no-cache"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        payload = response.read(8 * 1024 * 1024 + 1)
+    if len(payload) > 8 * 1024 * 1024:
+        raise ValueError("Registry response exceeds size limit")
+    return json.loads(payload)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", help="Defaults to pyproject.toml")
@@ -35,25 +47,20 @@ def main():
         )["project"]["version"]
         if not re.fullmatch(r"\d+\.\d+\.\d+", version):
             raise ValueError("Version must use X.Y.Z format")
-        # The API can serve a cached empty list immediately after publication.
-        # A fresh lookup must not mistake that response for an unpublished version.
-        request = urllib.request.Request(
-            f"{STATUS_URL}&_={time.time_ns()}",
-            headers={"User-Agent": "AusBoss-registry-check", "Cache-Control": "no-cache"},
-        )
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = response.read(8 * 1024 * 1024 + 1)
-        if len(payload) > 8 * 1024 * 1024:
-            raise ValueError("Registry response exceeds size limit")
-        entries = json.loads(payload)
-        if not isinstance(entries, list) or any(not isinstance(x, dict) for x in entries):
-            raise ValueError("Unexpected Registry response")
-        matches = [x for x in entries if x.get("version") == version]
-        if len(matches) > 1:
-            raise ValueError("Duplicate Registry versions")
-        entry = matches[0] if matches else {}
-        if entry and entry.get("node_id") != NODE_ID:
-            raise ValueError("Registry returned a different node pack")
+        # The list endpoint caches responses for 16 minutes and can still say
+        # [] after an upload. Use the uncached exact-version endpoint for status.
+        try:
+            entry = fetch_json(f"https://api.comfy.org/nodes/{NODE_ID}/versions/{version}")
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404:
+                raise
+            entry = None
+        if entry is not None and (
+            not isinstance(entry, dict) or entry.get("node_id") != NODE_ID
+            or entry.get("version") != version or not entry.get("status")
+        ):
+            raise ValueError("Registry returned an invalid or mismatched version")
+        entry = entry or {}
         status = entry.get("status", "NotPublished")
         if status not in STATUSES:
             raise ValueError("Unknown Registry status")
@@ -64,6 +71,19 @@ def main():
     print(f"{NODE_ID} {version}: {status}")
     print(STATUSES[status])
     reason = entry.get("status_reason") or ""
+    if entry and not reason:
+        # Detailed reasons are currently exposed by the list endpoint. Only
+        # accept one when it agrees with the exact version and current status.
+        try:
+            entries = fetch_json(f"{STATUS_URL}&_={time.time_ns()}")
+            if not isinstance(entries, list) or any(not isinstance(x, dict) for x in entries):
+                raise ValueError("Unexpected Registry response")
+            reasons = [x.get("status_reason") for x in entries
+                       if x.get("node_id") == NODE_ID and x.get("version") == version
+                       and x.get("status") == status and x.get("status_reason")]
+            reason = reasons[0] if reasons else ""
+        except (OSError, ValueError, TypeError):
+            print("Detailed review reason unavailable; the exact-version status above is verified.")
     if not isinstance(reason, str):
         reason = json.dumps(reason)
     for line in reason[:8000].splitlines():
