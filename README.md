@@ -15,7 +15,7 @@ This is a separate addon for [ComfyUI-AusBoss](https://github.com/ausboss/ComfyU
 
 <p align="center"><img src="docs/images/model-downloader.png" width="630" alt="Model Downloader with a missing Hugging Face file, an installed Civitai model, destination folders, and teal download buttons"></p>
 
-**Initial public version, 0.1.0.** Tested with real downloads on Linux in both Classic and Nodes 2.0. This addon has not been submitted to or approved by the Comfy Registry; use Git or the ZIP below to install it.
+**Initial public version, 0.1.0.** Tested with real downloads on Linux in both Classic and Nodes 2.0. Registry availability depends on review; the Git and ZIP installation methods below work independently. The Registry package ID is `ausboss-model-downloader`.
 
 ## What it does
 

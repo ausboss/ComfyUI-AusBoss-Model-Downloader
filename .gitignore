@@ -16,3 +16,4 @@ ausboss_*.md
 *.sft
 *.bin
 keys.json
+/node.zip

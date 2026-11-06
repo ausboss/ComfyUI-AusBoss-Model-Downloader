@@ -1,5 +1,5 @@
 [project]
-name = "comfyui-ausboss-model-downloader"
+name = "ausboss-model-downloader"
 version = "0.1.0"
 description = "Model downloads and Workflow Note integration for ComfyUI-AusBoss."
 requires-python = ">=3.10"
@@ -9,3 +9,9 @@ dependencies = []
 [project.urls]
 Repository = "https://github.com/ausboss/ComfyUI-AusBoss-Model-Downloader"
 Issues = "https://github.com/ausboss/ComfyUI-AusBoss-Model-Downloader/issues"
+
+[tool.comfy]
+PublisherId = "ausboss"
+DisplayName = "AusBoss Model Downloader"
+Icon = "https://github.com/ausboss.png?size=256"
+requires-comfyui = ">=0.44.0"
