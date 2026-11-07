@@ -1,6 +1,6 @@
 """Same-origin routes on ComfyUI's existing server."""
 from functools import wraps
-from urllib.parse import urlsplit
+import logging
 from aiohttp import web
 import folder_paths
 from server import PromptServer
@@ -22,9 +22,10 @@ def register():
             @wraps(fn)
             async def guarded(request):
                 try:
-                    origin = request.headers.get('Origin')
-                    if origin and urlsplit(origin).netloc != request.host:
-                        raise DownloadError('Open the downloader from this ComfyUI window.')
+                    # No Origin-vs-Host compare: behind a proxy (RunPod, tunnels, nginx) the Host the
+                    # server sees is not the browser's address. A JSON body forces a CORS preflight,
+                    # which ComfyUI refuses for other sites, and ComfyUI's own origin middleware
+                    # already guards a local server.
                     if method == 'post' and request.content_type != 'application/json':
                         raise DownloadError('Send a JSON request.')
                     user = server.user_manager.get_request_user_id(request)
@@ -35,7 +36,9 @@ def register():
                     return web.json_response(result, headers={'Cache-Control': 'no-store'})
                 except DownloadError as exc:
                     return web.json_response({'error': str(exc), 'state': exc.code}, status=400)
-                except Exception:
+                except Exception as exc:
+                    # Type only: raw network errors can carry signed URLs or tokens.
+                    logging.warning('[AusBoss Model Downloader] %s %s failed: %s', method.upper(), path, type(exc).__name__)
                     return web.json_response({'error': 'The request failed. Check the link, access key, and model folder.', 'state': 'error'}, status=400)
             getattr(server.routes, method)(PREFIX + path)(guarded)
             return guarded
@@ -43,11 +46,13 @@ def register():
 
     @route('get', '/info')
     async def info(user, data, request):
-        return {'folders': service.folders.names(), 'keys': service.store(user).key_status(), 'version': 1}
+        store = service.store(user)
+        return {'folders': service.folders.names(), 'keys': store.key_status(), 'key_sources': store.key_sources(), 'version': 1}
 
     @route('post', '/keys')
     async def keys(user, data, request):
-        return {'keys': service.store(user).save_keys(data)}
+        store = service.store(user)
+        return {'keys': store.save_keys(data), 'key_sources': store.key_sources()}
 
     @route('post', '/resolve')
     async def resolve(user, data, request):

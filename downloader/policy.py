@@ -5,6 +5,9 @@ import re
 
 MODEL_EXTENSIONS = frozenset({'.safetensors', '.gguf', '.ckpt', '.pt', '.bin', '.pth', '.onnx', '.sft'})
 PROVIDERS = {'huggingface.co': 'huggingface', 'civitai.com': 'civitai'}
+# ComfyUI still accepts the old names for these two folders (folder_paths.map_legacy),
+# and older workflows and notes use them.
+LEGACY_FOLDERS = {'unet': 'diffusion_models', 'clip': 'text_encoders'}
 BLOCKED = {'custom_nodes', 'configs', 'datasets', 'input', 'output', 'temp', 'user'}
 
 
@@ -95,6 +98,7 @@ class ModelFolders:
                       and MODEL_EXTENSIONS.intersection(extensions))
 
     def roots(self, folder):
+        folder = LEGACY_FOLDERS.get(folder, folder)
         if folder not in self.names():
             raise DownloadError('Choose a registered model folder. Code folders are not allowed.')
         roots = [Path(p).resolve() for p in self.registered[folder][0]]
@@ -113,19 +117,30 @@ class ModelFolders:
         return root, target
 
     def existing(self, folder, subfolder, filename):
+        """Find a model the way ComfyUI's own loaders list it, symlinks included.
+
+        Pods and shared setups often link model files or folders in from another disk.
+        ComfyUI loads those, so they count as installed. This only reports that a
+        name exists; nothing is read from or written to a linked location.
+        """
         import os
         parts = path_parts(subfolder, empty=True)
         model_filename(filename)
         for root in self.roots(folder):
             direct = root.joinpath(*parts, filename)
-            if direct.is_file() and contained(root, direct):
+            if direct.is_file():
                 return direct, direct.relative_to(root).as_posix()
-            # No symlink recursion; reject individual file links outside this root too.
-            for parent, dirs, files in os.walk(root, followlinks=False):
+            seen = set()
+            for parent, dirs, files in os.walk(root, followlinks=True):
+                real = os.path.realpath(parent)
+                if real in seen:
+                    dirs[:] = []
+                    continue
+                seen.add(real)
                 dirs[:] = [d for d in dirs if d.lower() != 'custom_nodes']
                 if filename in files:
                     candidate = Path(parent) / filename
-                    if contained(root, candidate) and candidate.is_file():
+                    if candidate.is_file():
                         return candidate, candidate.relative_to(root).as_posix()
         return None
 
@@ -158,6 +173,7 @@ def clean_rows(rows):
         subfolder = row.get('subfolder', '')
         path_parts(subfolder, empty=True)
         folder = row.get('folder', '')
+        folder = LEGACY_FOLDERS.get(folder, folder)
         if folder and (folder in BLOCKED or not re.fullmatch(r'[a-zA-Z0-9_-]+', folder)):
             raise DownloadError('Choose a model folder.')
         clean.append(dict(url=url, selected_url=selected, filename=filename, folder=folder,
