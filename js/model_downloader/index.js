@@ -4,25 +4,40 @@ import { chainCallback, keepDomWidgetWidthAuto, notifyAusbossChange, showToast }
 import { downloadAction, ensureDownloadControls, setActionLabel } from "../shared/download_controls.mjs";
 import { fillNodeHeight } from "../shared/panel_layout.mjs";
 import { panelKeepsWheel } from "../shared/canvas_passthrough.mjs";
-import { activeJob, cleanList, cleanRow, cleanUrl, noteModel, rowKey, sizeText, statusText } from "../shared/models.mjs";
+import { activeJob, cleanList, cleanRow, cleanUrl, nodeModels, noteModel, rowKey, sizeText, statusText } from "../shared/models.mjs";
 
 const TYPE = "AUSBOSS_NODES_ModelDownloader";
 const PROPERTY = "ausboss_models";
 const BASE = "/ausboss/model-downloader";
 const jobs = new Map(), listeners = new Set();
-let folders = [], keyStatus = {}, timer = null, polling = false;
+let folders = [], keyStatus = {}, keySources = {}, timer = null, polling = false;
 const emit = () => { for (const fn of listeners) fn(); };
-const fail = (error) => showToast({severity: "error", summary: "Model Downloader", detail: error.message});
+const recentToasts = new Map();
+const fail = (error) => {
+  // "Download missing" can hit the same problem on every row: say it once.
+  const detail = error?.message || String(error), now = Date.now();
+  if (now - (recentToasts.get(detail) || 0) < 5000) return;
+  recentToasts.set(detail, now);
+  showToast({severity: "error", summary: "Model Downloader", detail});
+};
 
 async function request(path, body) {
   const response = await api.fetchApi(BASE + path, body === undefined ? {} : {
     method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
   });
-  const result = await response.json();
+  let result;
+  try { result = await response.json(); }
+  catch {
+    const detail = response.status === 404
+      ? "The downloader is not loaded on the server. Restart ComfyUI, then refresh this page."
+      : `The ComfyUI server refused the request (HTTP ${response.status}). Check the ComfyUI console.`;
+    throw Object.assign(new Error(detail), {state: "error"});
+  }
   if (!response.ok || result.error) throw Object.assign(new Error(result.error || "The request failed."), {state: result.state});
   return result;
 }
-const infoReady = request("/info").then(info => { folders = info.folders; keyStatus = info.keys; }).catch(fail);
+function takeKeys(info) { keyStatus = info.keys || {}; keySources = info.key_sources || {}; }
+const infoReady = request("/info").then(info => { folders = info.folders; takeKeys(info); }).catch(fail);
 function schedulePoll() {
   if (!timer && !polling && [...jobs.values()].some(activeJob)) timer = setTimeout(poll, 800);
 }
@@ -37,6 +52,8 @@ async function poll() {
   }
   polling = false; emit(); schedulePoll();
   if (finished) {
+    // New files show up in loader lists without pressing R.
+    try { await app.refreshComboInNodes?.(); } catch { /* the lists refresh on the next R */ }
     // The pack owns installed-file matching and its "Use it" loader repair.
     for (const node of graphNodes()) if (node.type === "AUSBOSS_NODES_WorkflowNote") node.refreshComboInNode?.();
   }
@@ -112,6 +129,8 @@ function css() {
 .ausboss-downloader .abmd-destination{display:grid;grid-template-columns:45px minmax(110px,1fr) minmax(100px,1fr);align-items:center;gap:7px}
 .ausboss-downloader .abmd-folder-label{color:#c9b581;font-weight:600}
 .ausboss-downloader .abmd-row-tools{gap:4px}
+.ausboss-downloader .abmd-message{font:400 11px/1.4 system-ui,sans-serif;color:#ffb4bd;overflow-wrap:anywhere}
+.ausboss-downloader [data-state=auth_required] .abmd-message{color:#f5c56b}
 .ausboss-downloader .abmd-size{color:#a3b6b5;font:10px ui-monospace,monospace;margin-left:4px}
 .ausboss-downloader progress{width:100%;height:4px;accent-color:#00b4aa}
 .ausboss-downloader details{flex:none;border:1px solid #34464b;border-radius:5px;background:#1c282c;padding:7px 9px}
@@ -137,11 +156,12 @@ function build(node) {
   function render() {
     list.replaceChildren(); state.views = [];
     count.textContent = `${rows.length} ${rows.length === 1 ? "model" : "models"}`;
-    if (!rows.length) list.append(el("div", "abmd-empty", "Add a model link, or collect this workflow’s notes."));
+    if (!rows.length) list.append(el("div", "abmd-empty", "Add a model link, or use From workflow to collect its links."));
     rows.forEach((row, index) => {
       const box = el("div", "abmd-row"); box.dataset.enabled = String(row.enabled);
       const head = el("div", "abmd-toolbar"), name = el("span", "abmd-name", row.filename || `Model ${index + 1}`);
       const status = el("span", "abmd-status"), size = el("span", "abmd-size"), progress = el("progress"); progress.max = 100; progress.hidden = true;
+      const note = el("div", "abmd-message"); note.hidden = true;
       const provider = el("span", "abmd-provider");
       const updateProvider = () => {
         const host = row.url ? new URL(row.url).hostname : "";
@@ -164,19 +184,23 @@ function build(node) {
       async function inspect() {
         const generation = ++inspection;
         const checked = cleanUrl(url.value); if (!checked) return;
-        row.url = checked; row.selected_url = checked; row.filename = ""; updateProvider(); save();
+        // Keep the row as it was until the link resolves, so a failed lookup loses nothing.
         const info = await request("/resolve", {url: checked});
         if (generation !== inspection || state.dead) return;
+        if (checked !== row.url) {row.url = checked; row.filename = "";}
+        row.selected_url = checked; updateProvider(); save();
         fileSelect.replaceChildren();
         for (const file of info.files) {
           const option = el("option", "", `${file.path}${file.size ? ` · ${sizeText(file.size)}` : ""}`); option.value = file.url; fileSelect.append(option);
         }
         const choose = async () => {
-          const file = info.files.find(f => f.url === fileSelect.value);
+          const file = info.files.find(f => f.url === fileSelect.value) || info.files[0];
           Object.assign(row, {selected_url: file.url, filename: file.filename});
           if (!row.folder && folders.includes(file.folder)) {row.folder = file.folder; folder.value = row.folder;}
           name.textContent = row.filename; save(); await check(row);
         };
+        const current = info.files.find(f => f.filename === row.filename);
+        if (current) fileSelect.value = current.url;
         fileSelect.hidden = info.files.length < 2;
         fileSelect.onchange = () => choose().catch(fail);
         await choose();
@@ -199,8 +223,8 @@ function build(node) {
         button.disabled = index + delta < 0 || index + delta >= rows.length; tools.append(button);
       }
       tools.append(action("×", "Remove this row; files on disk are kept", () => {rows.splice(index, 1); save(); render();}, "danger"));
-      box.append(head, source, fileSelect, destination, progress, tools); list.append(box);
-      state.views.push({row, box, status, size, progress, dl, cancel});
+      box.append(head, source, fileSelect, destination, progress, note, tools); list.append(box);
+      state.views.push({row, box, status, size, progress, note, dl, cancel});
     });
     update();
   }
@@ -208,6 +232,8 @@ function build(node) {
     for (const view of state.views) {
       const job = jobs.get(rowKey(view.row)); view.box.dataset.state = job?.state || "";
       view.status.textContent = statusText(job); view.status.title = job?.message || "";
+      const problem = ["error", "auth_required"].includes(job?.state) && job.message;
+      view.note.hidden = !problem; view.note.textContent = problem || "";
       view.size.textContent = sizeText(job?.size || job?.total);
       view.progress.hidden = !activeJob(job);
       if (job?.progress != null) view.progress.value = job.progress; else view.progress.removeAttribute("value");
@@ -219,11 +245,14 @@ function build(node) {
   }
   toolbar.append(caption, count, el("span", "abmd-spacer"),
     action("+ Model", "Add a model link", () => {if (rows.length >= 100) throw new Error("The model limit is 100."); rows.push(cleanRow()); save(); render();}),
-    action("From notes", "Collect the model links in this workflow’s AusBoss notes", () => {
-      const known = new Set(rows.map(rowKey));
-      for (const n of graphNodes()) for (const entry of n.__ausbossNote?.rows || []) {
-        const row = noteModel(entry.row); if (row?.url && !known.has(rowKey(row)) && rows.length < 100) {rows.push(row); known.add(rowKey(row));}
+    action("From workflow", "Collect the model links in this workflow: AusBoss notes and the links ComfyUI templates keep on loader nodes", () => {
+      const known = new Set(rows.map(rowKey)), before = rows.length;
+      const add = (row) => {if (row?.url && !known.has(rowKey(row)) && rows.length < 100) {rows.push(row); known.add(rowKey(row));}};
+      for (const n of graphNodes()) {
+        for (const entry of n.__ausbossNote?.rows || []) add(noteModel(entry.row));
+        for (const row of nodeModels(n)) add(row);
       }
+      if (rows.length === before) showToast({severity: "info", summary: "Model Downloader", detail: "No new Hugging Face or Civitai model links found in this workflow."});
       save(); render(); void checkAll();
     }));
   async function checkAll() { for (const row of rows) if (!state.dead) await check(row); }
@@ -233,17 +262,19 @@ function build(node) {
       for (const row of rows) if (row.enabled && row.url) {await check(row); if (jobs.get(rowKey(row))?.state !== "installed") await download(row);}
     }, "primary", "download"));
   const keys = el("details"), keyBody = el("div", "abmd-fold"); keys.append(el("summary", "", "Access keys"), keyBody);
-  keyBody.append(el("div", "abmd-hint", "Saved on this machine. Never included in workflows or model lists."));
+  keyBody.append(el("div", "abmd-hint", "Saved on this machine. Never included in workflows or model lists. On a pod, set HF_TOKEN or CIVITAI_API_KEY in the template and every new pod has them."));
+  const keyHint = (id) => keySources[id] === "saved" || (!keySources[id] && keyStatus[id]) ? "Saved · enter to replace"
+    : keySources[id] === "environment" ? "Using the pod's environment key · enter to override" : "Access key";
   for (const [id, label] of [["civitai", "Civitai"], ["huggingface", "Hugging Face"]]) {
-    const line = el("div", "abmd-keyrow"), field = input(keyStatus[id] ? "Saved · enter to replace" : "Access key", "", "password");
+    const line = el("div", "abmd-keyrow"), field = input(keyHint(id), "", "password");
     field.autocomplete = "off";
     line.append(el("span", "abmd-caption", label), field, action("Save", `Save the ${label} key on this machine`, async () => {
       if (!field.value) return;
-      const info = await request("/keys", {[id]: field.value.trim()}); keyStatus = info.keys; field.value = ""; field.placeholder = "Saved · enter to replace";
+      const info = await request("/keys", {[id]: field.value.trim()}); takeKeys(info); field.value = ""; field.placeholder = keyHint(id);
       showToast({detail: `${label} key saved on this machine.`});
     }));
     keyBody.append(line);
-    keyBody.append(action(`Clear ${label} key`, "Remove this saved key", async () => {await request("/keys", {[id]: ""}); field.value = ""; field.placeholder = "Access key";}));
+    keyBody.append(action(`Clear ${label} key`, "Remove this saved key", async () => {takeKeys(await request("/keys", {[id]: ""})); field.value = ""; field.placeholder = keyHint(id);}));
   }
   const presets = el("details"), presetBody = el("div", "abmd-fold"), presetName = input("Model list name"), presetSelect = el("select");
   presets.append(el("summary", "", "Saved model lists"), presetBody);

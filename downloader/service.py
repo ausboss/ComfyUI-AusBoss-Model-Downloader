@@ -12,6 +12,25 @@ from .policy import DownloadError, clean_rows, contained, model_filename, source
 from .providers import ProviderClient
 
 
+# Pod templates (RunPod and others) can hand secrets in as environment variables, so a
+# key set once on the template works on every fresh pod. A key saved in the node wins.
+ENV_KEYS = {'civitai': ('CIVITAI_API_KEY', 'CIVITAI_TOKEN', 'CIVITAI_API_TOKEN'),
+            'huggingface': ('HF_TOKEN', 'HUGGING_FACE_HUB_TOKEN')}
+WRITE_BLOCK = 8 * 1024 * 1024
+
+
+def valid_key(value):
+    return isinstance(value, str) and len(value) <= 1024 and not any(ord(c) < 33 or ord(c) > 126 for c in value)
+
+
+def env_key(provider):
+    for name in ENV_KEYS[provider]:
+        value = os.environ.get(name, '').strip()
+        if value and valid_key(value):
+            return value
+    return ''
+
+
 class LocalStore:
     def __init__(self, root):
         self.root = Path(root)
@@ -41,16 +60,24 @@ class LocalStore:
     def keys(self):
         return self.read('keys.json')
 
+    def active_keys(self):
+        saved = self.keys()
+        return {k: saved.get(k) or env_key(k) for k in ENV_KEYS}
+
     def key_status(self):
         keys = self.keys()
-        return {k: bool(keys.get(k)) for k in ('civitai', 'huggingface')}
+        return {k: bool(keys.get(k)) for k in ENV_KEYS}
+
+    def key_sources(self):
+        keys = self.keys()
+        return {k: 'saved' if keys.get(k) else 'environment' if env_key(k) else '' for k in ENV_KEYS}
 
     def save_keys(self, data):
         keys = self.keys()
         for k in ('civitai', 'huggingface'):
             if k in data:
                 value = data[k]
-                if not isinstance(value, str) or len(value) > 1024 or any(ord(c) < 33 or ord(c) > 126 for c in value):
+                if not valid_key(value):
                     raise DownloadError('The access key has invalid characters.')
                 keys[k] = value
         self.write('keys.json', keys)
@@ -69,6 +96,26 @@ class LocalStore:
         self.write('presets.json', presets)
 
 
+def install(partial, target):
+    """Move a finished download into place without ever replacing an existing file."""
+    os.chmod(partial, 0o644)  # The partial was private while it streamed; a model is not.
+    try:
+        # Same-directory hard link is exclusive and atomic.
+        os.link(partial, target)
+        return
+    except FileExistsError:
+        raise
+    except OSError:
+        pass  # exFAT, some network volumes and FUSE mounts have no hard links.
+    # Claim the name exclusively first, then move the finished file over our own claim.
+    os.close(os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o644))
+    try:
+        os.replace(partial, target)
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+
+
 class DownloadService:
     def __init__(self, folders, storage):
         self.folders, self.storage = folders, Path(storage)
@@ -80,7 +127,7 @@ class DownloadService:
         return LocalStore(self.storage / hashlib.sha256(user.encode()).hexdigest())
 
     async def resolve(self, user, url):
-        async with ProviderClient(self.store(user).keys()) as client:
+        async with ProviderClient(self.store(user).active_keys()) as client:
             return await client.resolve(url)
 
     async def select(self, user, row):
@@ -108,8 +155,10 @@ class DownloadService:
         filename = row.get('filename', '')
         if not filename:
             filename = (await self.select(user, row))['filename']
-        self.folders.target(folder, subfolder, filename)
+        # Look before validating the write path: a linked model is installed, not an error.
         existing = await asyncio.to_thread(self.folders.existing, folder, subfolder, filename)
+        if not existing:
+            self.folders.target(folder, subfolder, filename)
         return {'state': 'installed' if existing else 'missing', 'filename': filename,
                 'path': existing[1] if existing else '', 'size': existing[0].stat().st_size if existing else 0}
 
@@ -161,12 +210,12 @@ class DownloadService:
                 job.update(state='downloading', message='Checking model')
                 info = await self.select(user, row)
                 filename = info['filename']
-                root, target = self.folders.target(row['folder'], row['subfolder'], filename)
                 found = await asyncio.to_thread(self.folders.existing, row['folder'], row['subfolder'], filename)
                 if found:
                     # Presence is filename-based; never overwrite an existing model.
                     job.update(state='installed', filename=filename, path=found[1], message='Already installed', progress=100)
                     return
+                root, target = self.folders.target(row['folder'], row['subfolder'], filename)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if not contained(root, target):
                     raise DownloadError('The destination leaves the registered model folder.')
@@ -175,7 +224,7 @@ class DownloadService:
                     raise DownloadError('There is not enough free disk space for this model.')
                 partial = target.with_name('.' + filename + '.' + job['id'] + '.part')
                 digest = hashlib.sha256()
-                async with ProviderClient(self.store(user).keys()) as client:
+                async with ProviderClient(self.store(user).active_keys()) as client:
                     response = await client.response(info['url'], info['provider'])
                     try:
                         if any(t in response.headers.get('Content-Type', '').lower() for t in ('text/html', 'application/json')):
@@ -187,24 +236,32 @@ class DownloadService:
                         job.update(filename=filename, total=total, message='Downloading')
                         fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o600)
                         with os.fdopen(fd, 'wb') as handle:
+                            def flush(block):
+                                handle.write(block); digest.update(block)
+                            buffer = bytearray()
+                            # Disk writes and hashing run off the event loop: a slow network
+                            # volume must not freeze ComfyUI's page while a model streams in.
                             async for chunk in response.content.iter_chunked(1024 * 1024):
                                 if job['downloaded'] + len(chunk) + 32 * 1024 * 1024 > free:
                                     raise DownloadError('The download exceeded the available disk space.')
-                                handle.write(chunk)
-                                digest.update(chunk)
+                                buffer += chunk
                                 job['downloaded'] += len(chunk)
                                 job['progress'] = min(99, round(job['downloaded'] / total * 100)) if total else None
+                                if len(buffer) >= WRITE_BLOCK:
+                                    await asyncio.to_thread(flush, bytes(buffer)); buffer.clear()
+                            if buffer:
+                                await asyncio.to_thread(flush, bytes(buffer))
                         if not job['downloaded'] or (content_length and job['downloaded'] != content_length):
                             raise DownloadError('The transfer was incomplete. Try again.')
-                        if info['size'] and job['downloaded'] != info['size']:
-                            raise DownloadError('The file size does not match the provider metadata. Try again.')
                         expected = info.get('sha256', '')
                         if expected and digest.hexdigest().lower() != expected.lower():
                             raise DownloadError('The downloaded file failed its SHA256 check.')
+                        # Civitai sizes are rounded kilobytes; the SHA256 is the real check when present.
+                        if not expected and info['size'] and job['downloaded'] != info['size']:
+                            raise DownloadError('The file size does not match the provider metadata. Try again.')
                         if not contained(root, target):
                             raise DownloadError('The destination leaves the registered model folder.')
-                        # Same-directory hard link is exclusive: never replace an existing model.
-                        os.link(partial, target)
+                        await asyncio.to_thread(install, partial, target)
                         job.update(state='installed', progress=100, path=target.relative_to(root).as_posix(), message='Installed')
                     finally:
                         response.close()

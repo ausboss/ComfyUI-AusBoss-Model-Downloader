@@ -44,6 +44,10 @@ class ProviderClient:
                 if not location:
                     raise DownloadError('The download redirect was empty.')
                 url = urljoin(url, location)
+                target = urlsplit(url)
+                if target.hostname == 'civitai.com' and target.path.rstrip('/') == '/login':
+                    # Civitai answers a download that needs an account with a login page, not a 401.
+                    raise DownloadError('Access required. Add your Civitai key and accept any model access terms.', 'auth_required')
                 continue
             if response.status in {401, 403}:
                 response.close()
@@ -129,8 +133,11 @@ class ProviderClient:
             data = versions[0]
             data['model'] = {'type': model.get('type', '')}
         files = []
-        for item in data.get('files', []):
-            if item.get('type') != 'Model':
+        # "Pruned Model" is the only file on some versions; the extension check below keeps
+        # training data, archives and configs out. Full models are listed first.
+        items = sorted(data.get('files', []), key=lambda f: f.get('type') != 'Model')
+        for item in items:
+            if item.get('type') in {'Training Data', 'Archive', 'Config'}:
                 continue
             if 'fileId' in query and str(item.get('id')) != query['fileId'][0]:
                 continue

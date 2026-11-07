@@ -81,7 +81,7 @@ No connections or **Run** click are needed for the downloader. Downloads are sta
 | --- | --- |
 | **On / Off** | Include or skip this row when using **Download missing**. An Off row can still be downloaded individually. |
 | **Check files** | Refresh installed/missing status across the registered folders. |
-| **From notes** | Collect model links and destinations from AusBoss Workflow Notes in this workflow. |
+| **From workflow** | Collect model links and destinations from this workflow: AusBoss Workflow Notes, and the model links ComfyUI templates keep on their loader nodes. |
 | **↑ / ↓** | Move a row earlier or later in the list. |
 | **×** | Remove a row from the list. The model file stays on disk. |
 | **Cancel** | Stop an active/queued transfer and remove its partial file. |
@@ -92,7 +92,7 @@ With **ComfyUI-AusBoss** installed, put a supported model URL and its destinatio
 
 <p align="center"><img src="docs/images/workflow-note.png" width="560" alt="AusBoss Workflow Note showing direct download and installed model states"></p>
 
-This works even when there is no Model Downloader node on the canvas. Use **From notes** when you want a central list and a **Download missing** button. Links to other websites and sample media keep their normal browser behavior.
+This works even when there is no Model Downloader node on the canvas. Use **From workflow** when you want a central list and a **Download missing** button. Links to other websites and sample media keep their normal browser behavior.
 
 On a fresh pod, open the saved workflow, add your access keys if required, and download the missing models. The workflow carries the model list, not your credentials.
 

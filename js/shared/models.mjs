@@ -22,13 +22,21 @@ export function cleanList(value) {
   if (!Array.isArray(rows) || rows.length > 100) throw new Error("Choose a model list with up to 100 rows.");
   return rows.map(cleanRow);
 }
+// ComfyUI still accepts these old folder names (folder_paths.map_legacy); older notes use them.
+const LEGACY_FOLDERS = {unet: "diffusion_models", clip: "text_encoders"};
 export function noteModel(row) {
-  const dirs = String(row.dir || "").replaceAll("\\", "/").split("/");
+  const dirs = String(row.dir || "").replaceAll("\\", "/").split("/").filter(Boolean);
   const names = String(row.name || "").replaceAll("\\", "/").split("/");
   const filename = names.pop();
   if (!MODEL_EXTENSIONS.test(filename) || !dirs[0] || dirs[0] === "input") return null;
-  try { return cleanRow({url: row.url, filename, folder: dirs.shift(), subfolder: [...dirs, ...names].join("/")}); }
+  const folder = dirs.shift();
+  try { return cleanRow({url: row.url, filename, folder: LEGACY_FOLDERS[folder] || folder, subfolder: [...dirs, ...names].join("/")}); }
   catch { return null; }
+}
+// ComfyUI's own templates list each loader's model on the node: properties.models = [{name, url, directory}].
+export function nodeModels(node) {
+  const list = node?.properties?.models;
+  return Array.isArray(list) ? list.map(m => m && noteModel({dir: m.directory, name: m.name, url: m.url})).filter(Boolean) : [];
 }
 export function rowKey(row) {
   return JSON.stringify([row.selected_url || row.url, row.folder, row.subfolder, row.filename]);
