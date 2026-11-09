@@ -27,7 +27,7 @@ class ProviderClient:
             connector=aiohttp.TCPConnector(resolver=PublicResolver()),
             timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=60),
             trust_env=False, auto_decompress=False,
-            headers={'User-Agent': 'AusBoss-Model-Downloader/0.1', 'Accept-Encoding': 'identity'},
+            headers={'User-Agent': 'AusBoss-Model-Downloader/0.2', 'Accept-Encoding': 'identity'},
         )
         return self
 
