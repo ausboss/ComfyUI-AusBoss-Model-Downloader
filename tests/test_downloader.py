@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -10,6 +11,20 @@ from downloader.policy import (DownloadError, MODEL_EXTENSIONS, ModelFolders, au
                                clean_rows, model_filename, source_url, suggested_folder, transfer_url)
 from downloader.providers import ProviderClient
 from downloader.service import DownloadService, LocalStore, install
+
+
+def model_mode():
+    """The mode a new model file gets: readable like any other file this user makes."""
+    mask = os.umask(0); os.umask(mask)
+    return 0o644 & ~mask
+
+
+class RegistryScanTests(unittest.TestCase):
+    def test_shipped_code_never_changes_file_modes(self):
+        # The Registry scan reads a mode change beside download code as "downloads and executes".
+        root = Path(__file__).resolve().parents[1]
+        shipped = [root / '__init__.py', *sorted((root / 'downloader').glob('*.py'))]
+        self.assertEqual([p.name for p in shipped if 'chmod' in p.read_text(encoding='utf-8')], [])
 
 
 class PolicyTests(unittest.TestCase):
@@ -144,7 +159,9 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.service.start('user', self.row)['id'], job['id'])
             result = await self.finish(job)
         self.assertEqual(result['state'], 'installed', result)
-        self.assertEqual((self.models / 'style/model.safetensors').read_bytes(), b'model-bytes')
+        target = self.models / 'style/model.safetensors'
+        self.assertEqual(target.read_bytes(), b'model-bytes')
+        self.assertEqual(target.stat().st_mode & 0o777, model_mode())
         self.assertFalse(list(self.models.rglob('*.part')))
         self.assertEqual((await self.service.check('user', self.row))['state'], 'installed')
 
@@ -201,7 +218,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['state'], 'installed', result)
         target = self.models / 'style/model.safetensors'
         self.assertEqual(target.read_bytes(), b'model-bytes')
-        self.assertEqual(target.stat().st_mode & 0o777, 0o644)
+        self.assertEqual(target.stat().st_mode & 0o777, model_mode())
         self.assertFalse(list(self.models.rglob('*.part')))
 
     async def test_link_fallback_never_replaces(self):

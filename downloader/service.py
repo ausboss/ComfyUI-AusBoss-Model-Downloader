@@ -98,7 +98,6 @@ class LocalStore:
 
 def install(partial, target):
     """Move a finished download into place without ever replacing an existing file."""
-    os.chmod(partial, 0o644)  # The partial was private while it streamed; a model is not.
     try:
         # Same-directory hard link is exclusive and atomic.
         os.link(partial, target)
@@ -234,7 +233,7 @@ class DownloadService:
                         if total + 32 * 1024 * 1024 > free:
                             raise DownloadError('There is not enough free disk space for this model.')
                         job.update(filename=filename, total=total, message='Downloading')
-                        fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+                        fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o644)
                         with os.fdopen(fd, 'wb') as handle:
                             def flush(block):
                                 handle.write(block); digest.update(block)
