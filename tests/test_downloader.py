@@ -186,16 +186,28 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         return [dict(self.row, url=self.row['url'].replace('model.', f'model{n}.'), filename=f'model{n}.safetensors')
                 for n in range(count)]
 
-    async def settle(self):
-        for _ in range(20):
-            await asyncio.sleep(0)
+    async def settle(self, ready):
+        """Wait until the jobs have got as far as they can before the gate opens.
+
+        A job also passes through a worker thread, so how long that takes is the
+        machine's business: wait for what the test needs, never for a number of turns.
+        """
+        for _ in range(1000):
+            if ready():
+                # A little longer, so a job that should have been held back would show up.
+                await asyncio.sleep(0.05)
+                return
+            await asyncio.sleep(0.01)
+        self.fail('The jobs did not get as far as the test needs.')
+
+    def states(self, jobs):
+        return [self.service.status('user', job['id'])['state'] for job in jobs]
 
     async def test_three_transfers_run_together_and_the_rest_wait(self):
         with self.gated():
             jobs = [self.service.start('user', row) for row in self.numbered(5)]
-            await self.settle()
-            states = [self.service.status('user', job['id'])['state'] for job in jobs]
-            self.assertEqual(states, ['downloading'] * 3 + ['queued'] * 2)
+            await self.settle(lambda: len(GatedClient.reached) >= 3)
+            self.assertEqual(self.states(jobs), ['downloading'] * 3 + ['queued'] * 2)
             self.assertEqual(len(GatedClient.reached), 3)
             GatedClient.gate.set()
             results = [await self.finish(job) for job in jobs]
@@ -209,7 +221,7 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             named = self.service.start('user', self.row)
             unnamed = self.service.start('user', dict(self.row, filename='', subfolder='other'))
             self.assertNotEqual(named['id'], unnamed['id'])
-            await self.settle()
+            await self.settle(lambda: GatedClient.reached)
             GatedClient.gate.set()
             results = [await self.finish(named), await self.finish(unnamed)]
         self.assertEqual(len(GatedClient.reached), 1)
@@ -219,17 +231,22 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_transfers_running_together_share_the_free_space(self):
         room = type('Usage', (), {'free': 11 + 32 * 1024 * 1024 + 5})  # Room for one model, not two.
         with self.gated(), patch('downloader.service.shutil.disk_usage', return_value=room):
-            first, second = [self.service.start('user', row) for row in self.numbered(2)]
-            await self.settle()
-            self.assertIn('not enough free disk space', self.service.status('user', second['id'])['message'])
+            jobs = [self.service.start('user', row) for row in self.numbered(2)]
+            await self.settle(lambda: 'error' in self.states(jobs))
+            # Whichever asks second is refused: the other one's bytes are already spoken for.
+            self.assertEqual(sorted(self.states(jobs)), ['downloading', 'error'])
+            refused = next(job for job in jobs if self.service.status('user', job['id'])['state'] == 'error')
+            kept = next(job for job in jobs if job is not refused)
+            self.assertIn('not enough free disk space', self.service.status('user', refused['id'])['message'])
+            self.assertEqual(len(GatedClient.reached), 1)
             GatedClient.gate.set()
-            self.assertEqual((await self.finish(first))['state'], 'installed')
+            self.assertEqual((await self.finish(kept))['state'], 'installed')
 
     async def test_cancel_while_waiting_frees_the_file_for_the_next_row(self):
         with self.gated():
             first = self.service.start('user', self.row)
             second = self.service.start('user', dict(self.row, filename=''))
-            await self.settle()
+            await self.settle(lambda: GatedClient.reached)
             self.service.cancel('user', first['id'])
             GatedClient.gate.set()
             results = [await self.finish(first), await self.finish(second)]
