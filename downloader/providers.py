@@ -1,10 +1,11 @@
 """Provider metadata and authenticated transfers; no arbitrary URL fetch route."""
+import asyncio
 import ipaddress
 import json
 import re
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 
-import aiohttp
+from aiohttp import ClientSession, ClientTimeout, DummyCookieJar, TCPConnector
 from aiohttp.resolver import DefaultResolver
 
 from .policy import DownloadError, auth_headers, model_filename, source_url, suggested_folder, transfer_url
@@ -18,21 +19,48 @@ class PublicResolver(DefaultResolver):
         return records
 
 
+def open_session():
+    """Talks only to public addresses, never reads proxy settings, and keeps no cookies."""
+    return ClientSession(
+        connector=TCPConnector(resolver=PublicResolver()),
+        timeout=ClientTimeout(total=None, connect=20, sock_read=60),
+        # No cookie jar: one session serves every ComfyUI user, so nothing a site sets carries over.
+        cookie_jar=DummyCookieJar(), trust_env=False, auto_decompress=False,
+        headers={'User-Agent': 'AusBoss-Model-Downloader/0.2', 'Accept-Encoding': 'identity'},
+    )
+
+
+class Connections:
+    """One connection pool for the lookups, redirects and transfers that run together.
+
+    A model lookup, its redirect and the file transfer reuse an open connection to the provider
+    instead of negotiating TLS each time. Access keys are sent per request, never stored here.
+    """
+    def __init__(self):
+        self.session, self.loop = None, None
+
+    def get(self):
+        loop = asyncio.get_running_loop()
+        if self.session is None or self.session.closed or self.loop is not loop:
+            self.session, self.loop = open_session(), loop
+        return self.session
+
+    async def close(self):
+        if self.session is not None and not self.session.closed:
+            await self.session.close()
+
+
 class ProviderClient:
-    def __init__(self, keys):
-        self.keys = keys
+    def __init__(self, keys, connections=None):
+        self.keys, self.connections = keys, connections
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(resolver=PublicResolver()),
-            timeout=aiohttp.ClientTimeout(total=None, connect=20, sock_read=60),
-            trust_env=False, auto_decompress=False,
-            headers={'User-Agent': 'AusBoss-Model-Downloader/0.2', 'Accept-Encoding': 'identity'},
-        )
+        self.session = self.connections.get() if self.connections else open_session()
         return self
 
     async def __aexit__(self, *args):
-        await self.session.close()
+        if not self.connections:
+            await self.session.close()
 
     async def response(self, url, provider):
         for _ in range(8):

@@ -9,24 +9,34 @@
 // in js/canvas_passthrough/ wires them to the page.
 
 // The wheel belongs to the panel while it can still scroll that way (a long
-// text box, a list of rows), or while a text field has the keyboard.
-export function canScrollFurther(element, deltaY) {
-  if (!element || !deltaY) return false;
-  const room = element.scrollHeight - element.clientHeight;
+// text box, a list of rows). A text box with the cursor in it is no
+// exception: when it has nothing left to scroll, the wheel zooms the graph,
+// as it does over ComfyUI's own text boxes.
+export function canScrollFurther(element, delta, axis = "y") {
+  if (!element || !delta) return false;
+  const horizontal = axis === "x";
+  const size = horizontal ? element.scrollWidth : element.scrollHeight;
+  const visible = horizontal ? element.clientWidth : element.clientHeight;
+  const start = horizontal ? element.scrollLeft : element.scrollTop;
+  const room = size - visible;
   if (room <= 1) return false;
-  return deltaY > 0 ? element.scrollTop + element.clientHeight < element.scrollHeight - 1 : element.scrollTop > 0;
+  return delta > 0 ? start + visible < size - 1 : start > 0;
 }
 
 // Does the wheel belong to something inside the panel, between the target
 // and the panel's own root? `styleOf` is getComputedStyle, passed in so this
 // stays testable without a page. `host` is the frontend's wrapper around the
 // panel: a pointer on the wrapper itself is on nothing inside the panel.
-export function panelKeepsWheel(target, event, { root, host, styleOf, activeElement }) {
+// Ctrl + wheel, which is also how a trackpad pinch arrives, always zooms the
+// graph; left to a scrolling box it would zoom the whole page.
+export function panelKeepsWheel(target, event, { root, host, styleOf }) {
+  if (event.ctrlKey || event.metaKey) return false;
   for (let element = target; element && element !== root && element !== host; element = element.parentElement) {
-    const tag = String(element.tagName ?? "").toUpperCase();
-    if ((tag === "TEXTAREA" || tag === "INPUT") && element === activeElement) return true;
-    const overflow = styleOf(element)?.overflowY;
+    const style = styleOf(element);
+    const overflow = style?.overflowY;
     if ((overflow === "auto" || overflow === "scroll") && canScrollFurther(element, event.deltaY)) return true;
+    const overflowX = style?.overflowX;
+    if ((overflowX === "auto" || overflowX === "scroll") && canScrollFurther(element, event.deltaX, "x")) return true;
   }
   return false;
 }

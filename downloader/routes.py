@@ -5,6 +5,7 @@ from aiohttp import web
 import folder_paths
 from server import PromptServer
 
+from . import frontend_cache
 from .policy import DownloadError, ModelFolders
 from .service import DownloadService
 
@@ -13,9 +14,17 @@ PREFIX = '/ausboss/model-downloader'
 
 def register():
     server = PromptServer.instance
+    frontend_cache.register(server)
     # System user folders cannot be read via ComfyUI's userdata HTTP routes.
     service = DownloadService(ModelFolders(folder_paths.folder_names_and_paths),
                               folder_paths.get_system_user_directory('ausboss_model_downloader'))
+
+    async def close_connections(app):
+        await service.connections.close()
+    try:
+        server.app.on_cleanup.append(close_connections)
+    except (AttributeError, RuntimeError):
+        pass  # Without the hook the operating system closes the connections at exit.
 
     def route(method, path):
         def decorate(fn):
@@ -52,7 +61,9 @@ def register():
     @route('post', '/keys')
     async def keys(user, data, request):
         store = service.store(user)
-        return {'keys': store.save_keys(data), 'key_sources': store.key_sources()}
+        saved = store.save_keys(data)
+        service.forget(user)
+        return {'keys': saved, 'key_sources': store.key_sources()}
 
     @route('post', '/resolve')
     async def resolve(user, data, request):

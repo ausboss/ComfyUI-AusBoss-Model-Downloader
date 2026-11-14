@@ -13,18 +13,18 @@ Paste a **Civitai** or **Hugging Face** link, choose the model folder, and click
 
 This is a separate addon for [ComfyUI-AusBoss](https://github.com/ausboss/ComfyUI-AusBoss). The downloader node works on its own; installing the main pack also adds direct downloads to its **Workflow Note** model rows.
 
-<p align="center"><img src="docs/images/model-downloader.png" width="630" alt="Model Downloader with a missing Hugging Face file, an installed Civitai model, destination folders, and teal download buttons"></p>
+<p align="center"><img src="docs/images/model-downloader.png" width="630" alt="Model Downloader listing seven models, one per row: name, folder, status, size and one button. Three are downloading, one is installed, one is waiting and one needs an access key"></p>
 
 **Version 0.2.1.** Works behind a proxy such as RunPod, counts linked model files as installed, reads `HF_TOKEN` and `CIVITAI_API_KEY` from the environment when no key is saved, and **From workflow** also collects the model links on loader nodes. Tested with real downloads on Linux in both Classic and Nodes 2.0. Registry availability depends on review; the Git and ZIP installation methods below work independently. The Registry package ID is `ausboss-model-downloader`.
 
 ## What it does
 
 - **Downloads to the right place.** Choose a registered model folder and an optional subfolder, such as `loras/style/anime`.
-- **Finds existing models.** Checks the selected model type's registered folders, including extra model paths and nested folders.
+- **Finds existing models.** Checks the selected model type's registered folders, including extra model paths and nested folders. A missing model shows its download size. A private link says it needs an access key before you click **Download**; a gated model says so when its download starts.
 - **Lets you choose the file.** Hugging Face repository links open a list of supported model files; Civitai model and version links work too.
 - **Keeps the list with the workflow.** Links, folders, and enabled rows travel with the saved workflow. Access keys stay on the ComfyUI machine.
-- **Shows progress and supports cancellation.** Downloads run one at a time in the background. Opening or running a workflow never starts a download automatically.
-- **Supports reusable lists.** Save named lists, import/export JSON, and reorder rows with the arrows.
+- **Shows progress and supports cancellation.** Up to three downloads run at the same time in the background; the rest wait their turn in list order. Two rows that name the same file download it once, and free disk space is shared out between the downloads running together. Opening or running a workflow never starts a download automatically.
+- **Supports reusable lists.** Save named lists, import/export JSON, and reorder rows by dragging the handle at the left of a row, or with the arrows in an opened row.
 
 ## Install
 
@@ -69,7 +69,7 @@ For help locating your installation, see [ComfyUI's custom-node installation gui
 
 ## Download your first model
 
-1. Add **Model Downloader 🆎** and click **+ Model**.
+1. Add **Model Downloader 🆎** and click **+ Model**. The new row opens with a box for its link.
 2. Paste a Civitai model/download URL or a Hugging Face repository/file URL. Click **Find files** if needed, then choose a file when a picker appears.
 3. Choose its **Folder**. Add a subfolder if you want one. Check that the destination matches the model's instructions.
 4. Click **Download** on that row, or **Download missing** to queue the enabled rows.
@@ -77,12 +77,16 @@ For help locating your installation, see [ComfyUI's custom-node installation gui
 
 No connections or **Run** click are needed for the downloader. Downloads are started by its buttons.
 
+Each model is one row: its name, folder, status, size and one button. Click a name to open that row and see its link, subfolder and the other options below; click it again to close it. When the list is longer than the node, the mouse wheel scrolls it from anywhere on the node.
+
 | Control | What it means |
 | --- | --- |
-| **On / Off** | Include or skip this row when using **Download missing**. An Off row can still be downloaded individually. |
+| **Download / Cancel / Installed** | The row's one button: start the download, stop it, or see that the file is already there. |
+| **Off / On** (opened row) | Include or skip this row when using **Download missing**. An Off row can still be downloaded individually. |
 | **Check files** | Refresh installed/missing status across the registered folders. |
 | **From workflow** | Collect model links and destinations from this workflow: AusBoss Workflow Notes, and the model links ComfyUI templates keep on their loader nodes. |
-| **↑ / ↓** | Move a row earlier or later in the list. |
+| Handle at the left of a row | Drag a row to a new place in the list. |
+| **↑ / ↓** (opened row) | Move a row earlier or later in the list. |
 | **×** | Remove a row from the list. The model file stays on disk. |
 | **Cancel** | Stop an active/queued transfer and remove its partial file. |
 
@@ -129,7 +133,7 @@ To uninstall, stop ComfyUI and remove this addon's folder from `custom_nodes`. D
 | Model is in a different folder | Choose the right model type and click **Check files**. Only that type's registered roots are searched. |
 | Workflow Note still opens a website | The row needs a Civitai/Hugging Face model URL and a recognized model folder. Update the main pack and restart ComfyUI. |
 | Transfer failed | Check free space, write permissions, the source link, and the network connection. The destination filesystem must support hard links for the final no-overwrite save. |
-| Old styling after an update | Restart ComfyUI and hard-refresh the browser. |
+| Old styling after an update | Restart ComfyUI and refresh the browser. |
 
 Need help? [Open an issue](https://github.com/ausboss/ComfyUI-AusBoss-Model-Downloader/issues) with your ComfyUI version, operating system, and the error message. Do not include access keys or signed download URLs.
 

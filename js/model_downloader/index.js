@@ -1,15 +1,21 @@
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
 import { chainCallback, keepDomWidgetWidthAuto, notifyAusbossChange, showToast } from "../shared/index.mjs";
-import { downloadAction, ensureDownloadControls, setActionLabel } from "../shared/download_controls.mjs";
-import { fillNodeHeight } from "../shared/panel_layout.mjs";
+import { actionIcon, downloadAction, ensureDownloadControls, setActionLabel } from "../shared/download_controls.mjs";
+import { fillNodeHeight, WIDGET_FRAME } from "../shared/panel_layout.mjs";
 import { panelKeepsWheel } from "../shared/canvas_passthrough.mjs";
-import { activeJob, cleanList, cleanRow, cleanUrl, nodeModels, noteModel, rowKey, sizeText, statusText } from "../shared/models.mjs";
+import { CONTROL_HEIGHT, FONT_UI, RADIUS_CARD, RADIUS_CONTROL, RADIUS_XS, SELECT_CHEVRON, THEME as T } from "../shared/theme.mjs";
+import { activeJob, cleanList, cleanRow, cleanUrl, eachAtOnce, moveItem, nodeModels, noteModel, rowKey, rowStatus, sizeText, statusText, wheelPixels, wheelScrollsList } from "../shared/models.mjs";
 
 const TYPE = "AUSBOSS_NODES_ModelDownloader";
 const PROPERTY = "ausboss_models";
 const BASE = "/ausboss/model-downloader";
-const jobs = new Map(), listeners = new Set();
+// Rows checked together; the server runs three transfers at once too, and queues the rest.
+const AT_ONCE = 3;
+const ROW_DRAG = "application/x-ausboss-model-row";
+// The narrowest the node goes: every column still shows, and a name keeps room to be read.
+const MIN_WIDTH = 600;
+const jobs = new Map(), sizes = new Map(), listeners = new Set();
 let folders = [], keyStatus = {}, keySources = {}, timer = null, polling = false;
 const emit = () => { for (const fn of listeners) fn(); };
 const recentToasts = new Map();
@@ -97,49 +103,98 @@ function applyBrandSurface(node) {
   if (!node.color || node.color.toLowerCase() === "#363c4a") node.color = "#14424d";
   if (!node.bgcolor || node.bgcolor.toLowerCase() === "#1d2027") node.bgcolor = "#161f21";
 }
+// One row of the list: grip, name, folder, status, size, the row's button, remove.
+// The heading uses the same columns, so every status, size and button lines up.
+const COLUMNS = "12px minmax(0,1fr) 116px 80px 58px 88px 26px";
+function gripIcon() {
+  const dots = [2, 7, 12].flatMap(y => [2, 6].map(x => `<circle cx="${x}" cy="${y}" r="1.3"/>`));
+  const box = el("span", "abmd-grip");
+  box.innerHTML = `<svg width="8" height="14" viewBox="0 0 8 14" fill="currentColor" aria-hidden="true">${dots.join("")}</svg>`;
+  return box;
+}
 function css() {
   ensureDownloadControls();
   if (document.getElementById("ausboss-downloader-style")) return;
   const style = el("style"); style.id = "ausboss-downloader-style";
+  const R = ".ausboss-downloader", H = CONTROL_HEIGHT;
   style.textContent = `
-.ausboss-downloader{box-sizing:border-box;width:100%;height:100%;padding:10px;display:flex;flex-direction:column;gap:10px;color:#e8ebe7;background:#161f21;border-radius:7px;font:12px system-ui,sans-serif;overflow:hidden}
-.ausboss-downloader *{box-sizing:border-box}
-.ausboss-downloader .abmd-toolbar{display:flex;gap:7px;align-items:center;flex-wrap:wrap;flex:none}
-.ausboss-downloader .abmd-caption{font:600 11px/1.3 system-ui,sans-serif;color:#b8c9c9}
-.ausboss-downloader .abmd-hint{font:400 10px/1.3 system-ui,sans-serif;color:#91a6a9}
-.ausboss-downloader .abmd-spacer{flex:1}
-.ausboss-downloader .abmd-title{border-left:3px solid #00b4aa;padding-left:8px;letter-spacing:.06em;color:#e8ebe7}
-.ausboss-downloader input,.ausboss-downloader select{width:100%;min-width:0;height:28px;border:1px solid #3a4b50;border-radius:4px;background:#0b1316;color:#d9e3e2;padding:4px 8px;font:11px system-ui,sans-serif;outline:none;color-scheme:dark}
-.ausboss-downloader input::placeholder{color:#8b9da1}
-.ausboss-downloader input:focus,.ausboss-downloader select:focus{border-color:#00b4aa;box-shadow:0 0 0 1px #00b4aa}
-.ausboss-downloader .abmd-list{flex:1;min-height:105px;overflow-y:auto;display:flex;flex-direction:column;gap:9px}
-.ausboss-downloader .abmd-row{flex:none;background:#202a2d;border:1px solid #3a4b50;border-radius:7px;padding:9px;display:flex;flex-direction:column;gap:8px;box-shadow:0 1px 2px #0003}
-.ausboss-downloader .abmd-row[data-enabled=false]{opacity:.55}
-.ausboss-downloader .abmd-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:600 12px system-ui,sans-serif;color:#e8ebe7}
-.ausboss-downloader .abmd-provider{flex:none;padding:3px 6px;border-radius:4px;font:700 10px/1.2 system-ui,sans-serif;background:#293538;color:#b8c9c9}
-.ausboss-downloader .abmd-provider[data-provider=huggingface]{background:#3f3420;color:#e8bd67}
-.ausboss-downloader .abmd-provider[data-provider=civitai]{background:#213b3d;color:#a5cbc8}
-.ausboss-downloader .abmd-status{display:inline-flex;align-items:center;gap:5px;font:600 10px system-ui,sans-serif;color:#b8c9c9;white-space:nowrap}
-.ausboss-downloader .abmd-status::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
-.ausboss-downloader [data-state=installed] .abmd-status{color:#6fc0aa}
-.ausboss-downloader [data-state=missing] .abmd-status,.ausboss-downloader [data-state=queued] .abmd-status{color:#f5b53d}
-.ausboss-downloader [data-state=error] .abmd-status{color:#ff939f}
-.ausboss-downloader [data-state=auth_required] .abmd-status{color:#f5b53d}
-.ausboss-downloader [data-state=downloading] .abmd-status,.ausboss-downloader [data-state=checking] .abmd-status{color:#00b4aa}
-.ausboss-downloader .abmd-destination{display:grid;grid-template-columns:45px minmax(110px,1fr) minmax(100px,1fr);align-items:center;gap:7px}
-.ausboss-downloader .abmd-folder-label{color:#c9b581;font-weight:600}
-.ausboss-downloader .abmd-row-tools{gap:4px}
-.ausboss-downloader .abmd-message{font:400 11px/1.4 system-ui,sans-serif;color:#ffb4bd;overflow-wrap:anywhere}
-.ausboss-downloader [data-state=auth_required] .abmd-message{color:#f5c56b}
-.ausboss-downloader .abmd-size{color:#a3b6b5;font:10px ui-monospace,monospace;margin-left:4px}
-.ausboss-downloader progress{width:100%;height:4px;accent-color:#00b4aa}
-.ausboss-downloader details{flex:none;border:1px solid #34464b;border-radius:5px;background:#1c282c;padding:7px 9px}
-.ausboss-downloader summary{cursor:pointer;font:600 11px/1.3 system-ui,sans-serif;color:#b2c6c3}
-.ausboss-downloader .abmd-fold{display:flex;flex-direction:column;gap:7px;margin-top:9px}
-.ausboss-downloader .abmd-keyrow{display:grid;grid-template-columns:85px 1fr auto;gap:6px;align-items:center}
-.ausboss-downloader .abmd-empty{padding:24px 12px;border:1px dashed #47585b;border-radius:6px;background:#202a2d;color:#a3b6b5;text-align:center;line-height:1.6}
-.ausboss-downloader .abmd-footer{padding-top:2px}
-.ausboss-downloader .abmd-footer [data-tone=primary]{flex:1;min-height:32px;font-size:12px}
+${R}{box-sizing:border-box;width:100%;height:100%;padding:8px;display:flex;flex-direction:column;gap:8px;color:${T.inkSoft};background:${T.card};border-radius:${RADIUS_CARD}px;font:12px/1.3 ${FONT_UI};overflow:hidden}
+${R} *{box-sizing:border-box}
+${R}:focus{outline:none}
+${R} .abmd-toolbar{display:flex;gap:6px;align-items:center;flex:none}
+${R} .abmd-title{font:600 10px/1 ${FONT_UI};letter-spacing:.1em;text-transform:uppercase;color:${T.faint};user-select:none}
+${R} .abmd-hint{font:400 10px/1.3 ${FONT_UI};color:${T.faint}}
+${R} .abmd-label{flex:none;font:400 11px/1 ${FONT_UI};color:${T.label};white-space:nowrap}
+${R} .abmd-spacer{flex:1}
+${R} input,${R} select{width:100%;min-width:0;height:${H}px;border:1px solid transparent;border-radius:${RADIUS_CONTROL}px;background:${T.fill};color:${T.ink};padding:0 8px;font:12px ${FONT_UI};outline:none;color-scheme:dark}
+${R} select{appearance:none;-webkit-appearance:none;padding-right:24px;background:${T.fill} ${SELECT_CHEVRON} no-repeat right 9px center;cursor:pointer;text-overflow:ellipsis}
+${R} select:hover{background-color:${T.fillHover}}
+${R} input::placeholder{color:${T.faint}}
+${R} input:focus{border-color:${T.brand}}
+${R} select:focus-visible{outline:2px solid ${T.brand};outline-offset:1px}
+${R} .abmd-listbox{position:relative;flex:1;min-height:96px}
+${R} .abmd-list{position:absolute;inset:0;overflow-y:auto;overscroll-behavior:contain}
+${R} .abmd-list::-webkit-scrollbar{width:6px}
+${R} .abmd-list::-webkit-scrollbar-track{background:transparent}
+${R} .abmd-list::-webkit-scrollbar-thumb{background:${T.fill};border-radius:3px}
+${R} .abmd-list::-webkit-scrollbar-thumb:hover{background:${T.fillHover}}
+@supports not selector(::-webkit-scrollbar){${R} .abmd-list{scrollbar-width:thin;scrollbar-color:${T.fill} transparent}}
+${R} .abmd-head,${R} .abmd-line{display:grid;grid-template-columns:${COLUMNS};align-items:center;column-gap:8px;padding:0 2px}
+${R} .abmd-head{position:sticky;top:0;z-index:2;height:22px;background:${T.card};border-bottom:1px solid ${T.rule};font:600 10px/1 ${FONT_UI};letter-spacing:.1em;text-transform:uppercase;color:${T.faint};user-select:none}
+${R} .abmd-right{text-align:right}
+${R} .abmd-row{border-bottom:1px solid ${T.rule}}
+${R} .abmd-line{position:relative;height:${H + 8}px}
+${R} .abmd-row[data-enabled=false] :is(.abmd-name,.abmd-status,.abmd-size){opacity:.5}
+${R} .abmd-row.abmd-dragging{opacity:.4}
+${R} .abmd-row[data-drop=before]{box-shadow:inset 0 2px 0 ${T.brand}}
+${R} .abmd-row[data-drop=after]{box-shadow:inset 0 -2px 0 ${T.brand}}
+${R} .abmd-grip{display:grid;place-items:center;height:${H}px;cursor:grab;color:${T.faint};user-select:none}
+${R} .abmd-grip:hover{color:${T.ink}}
+${R} .abmd-grip:active{cursor:grabbing}
+${R} .abmd-name{display:flex;align-items:center;gap:5px;min-width:0;height:${H}px;padding:0;border:0;border-radius:${RADIUS_XS}px;background:none;color:${T.ink};font:600 12px/1 ${FONT_UI};text-align:left;cursor:pointer}
+${R} .abmd-name span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+${R} .abmd-name svg{width:10px;height:10px;flex:none;fill:none;stroke:${T.label};stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round;transition:transform .12s}
+${R} .abmd-name:hover{color:${T.inkHover}}
+${R} .abmd-name:hover svg{stroke:${T.inkHover}}
+${R} .abmd-name:focus-visible{outline:2px solid ${T.brand};outline-offset:1px}
+${R} .abmd-name[data-empty=true] span{color:${T.faint};font-weight:400}
+${R} .abmd-row[data-open=true] .abmd-name svg{transform:rotate(90deg)}
+${R} .abmd-status{display:flex;align-items:center;gap:6px;min-width:0;font:600 11px/1 ${FONT_UI};color:${T.faint};white-space:nowrap}
+${R} .abmd-status::before{content:"";flex:none;width:6px;height:6px;border-radius:50%;background:currentColor}
+${R} [data-state=installed] .abmd-status{color:${T.brandInk}}
+${R} :is([data-state=missing],[data-state=queued],[data-state=auth_required]) .abmd-status{color:${T.warn}}
+${R} [data-state=error] .abmd-status{color:${T.danger}}
+${R} :is([data-state=downloading],[data-state=checking]) .abmd-status{color:${T.ink}}
+${R} .abmd-size{text-align:right;font:500 11px/1 ${FONT_UI};font-variant-numeric:tabular-nums;color:${T.label};white-space:nowrap}
+${R} .abmd-size[data-empty=true]{color:${T.faint}}
+${R} .abmd-do{display:grid}
+${R} .abmd-do .abmd-control{width:100%;padding:0}
+${R} .abmd-bar{position:absolute;left:0;right:0;bottom:-1px;height:2px;background:${T.fill};z-index:1}
+${R} .abmd-bar[hidden]{display:none}
+${R} .abmd-bar i{display:block;height:100%;background:${T.brand};transition:width .3s}
+${R} .abmd-bar[data-unknown=true] i{opacity:.4}
+${R} .abmd-message{padding:0 2px 6px 22px;font:400 11px/1.4 ${FONT_UI};color:${T.dangerInk};overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+${R} .abmd-message[hidden]{display:none}
+${R} [data-open=true] .abmd-message{white-space:normal;overflow-wrap:anywhere}
+${R} [data-state=auth_required] .abmd-message{color:${T.warnInk}}
+${R} .abmd-more{display:flex;flex-direction:column;gap:5px;padding:1px 2px 8px 22px}
+${R} .abmd-more[hidden]{display:none}
+${R} .abmd-more-line{display:flex;align-items:center;gap:6px;min-width:0}
+${R} .abmd-more-line input{flex:1}
+${R} .abmd-more-line .abmd-label:not(:first-child){margin-left:6px}
+${R} .abmd-provider{flex:none;height:20px;display:inline-flex;align-items:center;padding:0 9px;border-radius:999px;background:${T.brandSoft};color:${T.brandInk};font:600 10px/1 ${FONT_UI};letter-spacing:.02em;white-space:nowrap}
+${R} .abmd-pill{flex:none;display:grid;grid-auto-flow:column;grid-auto-columns:1fr;width:84px;height:${H}px;padding:2px;border-radius:${RADIUS_CONTROL}px;background:${T.fill}}
+${R} .abmd-pill button{min-width:0;border:none;border-radius:${RADIUS_XS}px;padding:0;background:transparent;color:${T.label};font:600 11px/1 ${FONT_UI};cursor:pointer}
+${R} .abmd-pill button:hover{color:${T.inkHover}}
+${R} .abmd-pill button.on{background:${T.brand};color:${T.onBrand}}
+${R} .abmd-pill button:focus-visible{outline:2px solid ${T.brand};outline-offset:1px}
+${R} details{flex:none;border-top:1px solid ${T.rule};padding-top:7px}
+${R} summary{cursor:pointer;font:600 11px/1.3 ${FONT_UI};color:${T.label};user-select:none}
+${R} summary:hover{color:${T.inkHover}}
+${R} .abmd-fold{display:flex;flex-direction:column;gap:6px;margin-top:8px}
+${R} .abmd-keyrow{display:grid;grid-template-columns:85px 1fr auto;gap:6px;align-items:center}
+${R} .abmd-empty{padding:22px 12px;color:${T.faint};text-align:center;line-height:1.6}
+${R} .abmd-footer [data-tone=primary]{flex:1}
 `;
   document.head.append(style);
 }
@@ -149,36 +204,84 @@ function build(node) {
   let rows;
   try { rows = cleanList(node.properties[PROPERTY] || []); } catch { rows = []; }
   const root = el("div", "ausboss-downloader"), toolbar = el("div", "abmd-toolbar"), list = el("div", "abmd-list");
-  const caption = el("span", "abmd-caption abmd-title", "MODELS"), count = el("span", "abmd-hint");
+  // The list sits out of flow in its box, so a long list scrolls instead of stretching the node (Nodes 2.0 sizes a node by its content).
+  const listBox = el("div", "abmd-listbox"); listBox.append(list);
+  const caption = el("span", "abmd-title", "Models"), count = el("span", "abmd-hint");
   const state = {node, root, rows, list, views: [], dead: false};
+  // Rows showing their link and options. A row opens by a click on its name; a new, empty row starts open.
+  const open = new WeakSet();
+  let dragging = null;
   node.__ausbossDownloader = state;
   function save() { node.properties[PROPERTY] = rows.map(cleanRow); notifyAusbossChange(); }
   function render() {
+    const scrolled = list.scrollTop;
     list.replaceChildren(); state.views = [];
     count.textContent = `${rows.length} ${rows.length === 1 ? "model" : "models"}`;
     if (!rows.length) list.append(el("div", "abmd-empty", "Add a model link, or use From workflow to collect its links."));
+    else {
+      const head = el("div", "abmd-head");
+      head.append(el("span"), el("span", "", "Model"), el("span", "", "Folder"), el("span", "", "Status"), el("span", "abmd-right", "Size"), el("span"), el("span"));
+      list.append(head);
+    }
     rows.forEach((row, index) => {
       const box = el("div", "abmd-row"); box.dataset.enabled = String(row.enabled);
-      const head = el("div", "abmd-toolbar"), name = el("span", "abmd-name", row.filename || `Model ${index + 1}`);
-      const status = el("span", "abmd-status"), size = el("span", "abmd-size"), progress = el("progress"); progress.max = 100; progress.hidden = true;
+      const line = el("div", "abmd-line"), more = el("div", "abmd-more");
+      const name = el("button", "abmd-name"), nameText = el("span"); name.type = "button";
+      name.append(actionIcon("chevron"), nameText);
+      const showName = () => {
+        nameText.textContent = row.filename || "New model"; name.dataset.empty = String(!row.filename);
+        name.title = `${row.filename ? row.filename + "\n" : ""}Click to show or hide the link and options${row.enabled ? "" : "\nOff: Download missing skips this model"}`;
+      }; showName();
+      const setOpen = (value) => {
+        if (value) open.add(row); else open.delete(row);
+        box.dataset.open = String(value); more.hidden = !value; name.setAttribute("aria-expanded", String(value));
+      };
+      name.addEventListener("click", () => setOpen(more.hidden));
+      const status = el("span", "abmd-status"), size = el("span", "abmd-size");
+      const bar = el("div", "abmd-bar"), fill = el("i"); bar.append(fill); bar.hidden = true;
       const note = el("div", "abmd-message"); note.hidden = true;
       const provider = el("span", "abmd-provider");
       const updateProvider = () => {
         const host = row.url ? new URL(row.url).hostname : "";
-        provider.dataset.provider = host === "huggingface.co" ? "huggingface" : host === "civitai.com" ? "civitai" : "";
-        provider.textContent = host === "huggingface.co" ? "HF" : host === "civitai.com" ? "Civitai" : "URL";
-        provider.title = host === "huggingface.co" ? "Hugging Face" : host || "Paste a model URL";
+        provider.textContent = host === "huggingface.co" ? "Hugging Face" : host === "civitai.com" ? "Civitai" : "Link";
       }; updateProvider();
-      const on = action(row.enabled ? "On" : "Off", "Include this model in Download missing", () => {row.enabled = !row.enabled; save(); render();});
-      on.setAttribute("aria-pressed", String(row.enabled));
-      on.classList.add("abmd-enabled");
       const dl = action("Download", "Save this model into its selected folder", () => download(row), "primary", "download");
       const cancel = action("Cancel", "Cancel this transfer and remove its partial file", async () => {
         const job = jobs.get(rowKey(row)); if (job?.id) {await request("/cancel", {id: job.id}); await poll();}
       }, "danger"); cancel.hidden = true;
-      head.append(provider, name, on, dl, cancel);
-      const source = el("div", "abmd-toolbar"), url = input("Civitai or Hugging Face link", row.url);
-      url.style.flex = "1";
+      const act = el("div", "abmd-do"); act.append(dl, cancel);
+      // Drag the grip to reorder; the arrows in the opened row do the same from the keyboard.
+      const grip = gripIcon(); grip.title = "Drag to reorder"; grip.draggable = true;
+      grip.addEventListener("dragstart", event => {
+        dragging = index; box.classList.add("abmd-dragging");
+        event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData(ROW_DRAG, String(index));
+        event.dataTransfer.setDragImage?.(box, 16, 16); event.stopPropagation();
+      });
+      grip.addEventListener("dragend", () => {dragging = null; box.classList.remove("abmd-dragging"); for (const v of state.views) delete v.box.dataset.drop;});
+      box.addEventListener("dragover", event => {
+        if (dragging === null) return;
+        event.preventDefault(); event.stopPropagation(); event.dataTransfer.dropEffect = "move";
+        const rect = box.getBoundingClientRect();
+        box.dataset.drop = event.clientY > rect.top + rect.height / 2 ? "after" : "before";
+      });
+      box.addEventListener("dragleave", event => {if (!box.contains(event.relatedTarget)) delete box.dataset.drop;});
+      box.addEventListener("drop", event => {
+        if (dragging === null) return;
+        // Keep the drop away from ComfyUI's own file drop on the page.
+        event.preventDefault(); event.stopPropagation();
+        const from = dragging, after = box.dataset.drop === "after"; dragging = null;
+        if (moveItem(rows, from, index, after)) save();
+        render();
+      });
+      const folder = el("select"); folder.setAttribute("aria-label", "Model folder"); folder.title = "The models folder this file is saved in";
+      folder.append(el("option", "", "Choose folder…")); folder.firstChild.value = "";
+      for (const value of [...new Set([...folders, ...(row.folder ? [row.folder] : [])])]) {const o = el("option", "", value); o.value = value; folder.append(o);}
+      folder.value = row.folder;
+      folder.onchange = () => {row.folder = folder.value; save(); void check(row);};
+      const remove = action("", "Remove this row; files on disk are kept", () => {rows.splice(index, 1); save(); render();}, "quiet", "close");
+      remove.classList.add("abmd-icon-only");
+      line.append(grip, name, folder, status, size, act, remove, bar);
+      const source = el("div", "abmd-more-line"), url = input("Civitai or Hugging Face link", row.url);
       const fileSelect = el("select"); fileSelect.setAttribute("aria-label", "Model file"); fileSelect.hidden = true;
       let inspection = 0;
       async function inspect() {
@@ -197,7 +300,7 @@ function build(node) {
           const file = info.files.find(f => f.url === fileSelect.value) || info.files[0];
           Object.assign(row, {selected_url: file.url, filename: file.filename});
           if (!row.folder && folders.includes(file.folder)) {row.folder = file.folder; folder.value = row.folder;}
-          name.textContent = row.filename; save(); await check(row);
+          showName(); save(); await check(row);
         };
         const current = info.files.find(f => f.filename === row.filename);
         if (current) fileSelect.value = current.url;
@@ -206,45 +309,55 @@ function build(node) {
         await choose();
       }
       url.addEventListener("change", () => inspect().catch(error => {url.value = row.url; fail(error);}));
-      source.append(url, action("Find files", "Read model information from this link", inspect));
-      const destination = el("div", "abmd-destination"), folder = el("select"), sub = input("Subfolder (optional)", row.subfolder);
-      folder.setAttribute("aria-label", "Model folder");
-      folder.append(el("option", "", "Choose folder…")); folder.firstChild.value = "";
-      for (const value of [...new Set([...folders, ...(row.folder ? [row.folder] : [])])]) {const o = el("option", "", value); o.value = value; folder.append(o);}
-      folder.value = row.folder;
-      folder.onchange = () => {row.folder = folder.value; save(); void check(row);};
+      source.append(provider, url, action("Find files", "Read model information from this link", inspect));
+      const options = el("div", "abmd-more-line"), sub = input("Subfolder (optional)", row.subfolder);
       sub.onchange = () => {row.subfolder = sub.value.trim(); save(); void check(row);};
-      destination.append(el("span", "abmd-hint abmd-folder-label", "Folder"), folder, sub);
-      const tools = el("div", "abmd-toolbar abmd-row-tools");
-      tools.append(status, size, el("span", "abmd-spacer"));
+      const pill = el("div", "abmd-pill"); pill.setAttribute("role", "group");
+      pill.title = "On: Download missing includes this model. Off: it is skipped.";
+      for (const value of [false, true]) {
+        const side = el("button", row.enabled === value ? "on" : "", value ? "On" : "Off"); side.type = "button";
+        side.setAttribute("aria-pressed", String(row.enabled === value));
+        side.addEventListener("click", () => {if (row.enabled !== value) {row.enabled = value; save(); render();}});
+        pill.append(side);
+      }
+      options.append(el("span", "abmd-label", "Subfolder"), sub, el("span", "abmd-label", "Download missing"), pill);
       for (const delta of [-1, 1]) {
         const button = action("", "Move model " + (delta < 0 ? "up" : "down"), () => {const next = index + delta; [rows[index], rows[next]] = [rows[next], rows[index]]; save(); render();}, "neutral", delta < 0 ? "up" : "down");
         button.classList.add("abmd-icon-only");
-        button.disabled = index + delta < 0 || index + delta >= rows.length; tools.append(button);
+        button.disabled = index + delta < 0 || index + delta >= rows.length; options.append(button);
       }
-      tools.append(action("×", "Remove this row; files on disk are kept", () => {rows.splice(index, 1); save(); render();}, "danger"));
-      box.append(head, source, fileSelect, destination, progress, note, tools); list.append(box);
-      state.views.push({row, box, status, size, progress, note, dl, cancel});
+      more.append(source, fileSelect, options);
+      box.append(line, note, more); list.append(box);
+      setOpen(open.has(row));
+      state.views.push({row, box, status, size, bar, fill, note, dl, cancel});
     });
+    list.scrollTop = scrolled;
     update();
   }
   function update() {
     for (const view of state.views) {
-      const job = jobs.get(rowKey(view.row)); view.box.dataset.state = job?.state || "";
-      view.status.textContent = statusText(job); view.status.title = job?.message || "";
+      const key = rowKey(view.row), job = jobs.get(key), installed = job?.state === "installed";
+      view.box.dataset.state = job?.state || "";
+      view.status.textContent = rowStatus(job);
+      view.status.title = job?.state === "downloading" && job.total ? `${sizeText(job.downloaded) || "0 B"} of ${sizeText(job.total)}` : job?.message || statusText(job);
       const problem = ["error", "auth_required"].includes(job?.state) && job.message;
-      view.note.hidden = !problem; view.note.textContent = problem || "";
-      view.size.textContent = sizeText(job?.size || job?.total);
-      view.progress.hidden = !activeJob(job);
-      if (job?.progress != null) view.progress.value = job.progress; else view.progress.removeAttribute("value");
-      view.dl.disabled = !view.row.url || !view.row.folder || activeJob(job) || job?.state === "installed";
-      setActionLabel(view.dl, job?.state === "installed" ? "✓ Installed" : "Download", job?.state === "installed" ? "" : "download");
-      view.dl.dataset.tone = job?.state === "installed" ? "success" : "primary";
-      view.cancel.hidden = !activeJob(job) || !job.id;
+      view.note.hidden = !problem; view.note.textContent = problem || ""; view.note.title = problem || "";
+      // A row keeps the size it last reported, so the column does not blank while a download waits its turn.
+      if (job?.size || job?.total) sizes.set(key, job.size || job.total);
+      view.size.textContent = sizeText(sizes.get(key)) || "–"; view.size.dataset.empty = String(!sizes.get(key));
+      view.bar.hidden = job?.state !== "downloading"; view.bar.dataset.unknown = String(job?.progress == null);
+      view.fill.style.width = job?.progress == null ? "100%" : `${job.progress}%`;
+      view.cancel.hidden = !activeJob(job) || !job.id; view.dl.hidden = !view.cancel.hidden;
+      view.dl.disabled = !view.row.url || !view.row.folder || activeJob(job) || installed;
+      setActionLabel(view.dl, installed ? "Installed" : job?.state === "error" ? "Retry" : "Download", installed ? "check" : "download");
+      view.dl.dataset.tone = installed ? "success" : "primary";
     }
   }
   toolbar.append(caption, count, el("span", "abmd-spacer"),
-    action("+ Model", "Add a model link", () => {if (rows.length >= 100) throw new Error("The model limit is 100."); rows.push(cleanRow()); save(); render();}),
+    action("+ Model", "Add a model link", () => {
+      if (rows.length >= 100) throw new Error("The model limit is 100.");
+      const row = cleanRow(); rows.push(row); open.add(row); save(); render(); list.scrollTop = list.scrollHeight;
+    }),
     action("From workflow", "Collect the model links in this workflow: AusBoss notes and the links ComfyUI templates keep on loader nodes", () => {
       const known = new Set(rows.map(rowKey)), before = rows.length;
       const add = (row) => {if (row?.url && !known.has(rowKey(row)) && rows.length < 100) {rows.push(row); known.add(rowKey(row));}};
@@ -255,11 +368,14 @@ function build(node) {
       if (rows.length === before) showToast({severity: "info", summary: "Model Downloader", detail: "No new Hugging Face or Civitai model links found in this workflow."});
       save(); render(); void checkAll();
     }));
-  async function checkAll() { for (const row of rows) if (!state.dead) await check(row); }
+  async function checkAll() { await eachAtOnce(rows.slice(), AT_ONCE, async row => {if (!state.dead) await check(row);}); }
   const footer = el("div", "abmd-toolbar abmd-footer");
-  footer.append(action("↻ Check files", "Check all registered model folders, including extra paths", checkAll),
+  footer.append(action("Check files", "Check all registered model folders, including extra paths", checkAll, "neutral", "refresh"),
     action("Download missing", "Queue enabled models; existing files are skipped", async () => {
-      for (const row of rows) if (row.enabled && row.url) {await check(row); if (jobs.get(rowKey(row))?.state !== "installed") await download(row);}
+      const wanted = rows.filter(row => row.enabled && row.url && row.folder);
+      await eachAtOnce(wanted, AT_ONCE, check);
+      // Started in list order: the first three download together and the rest wait their turn.
+      for (const row of wanted) if (!["installed", "auth_required"].includes(jobs.get(rowKey(row))?.state)) await download(row);
     }, "primary", "download"));
   const keys = el("details"), keyBody = el("div", "abmd-fold"); keys.append(el("summary", "", "Access keys"), keyBody);
   keyBody.append(el("div", "abmd-hint", "Saved on this machine. Never included in workflows or model lists. On a pod, set HF_TOKEN or CIVITAI_API_KEY in the template and every new pod has them."));
@@ -268,7 +384,7 @@ function build(node) {
   for (const [id, label] of [["civitai", "Civitai"], ["huggingface", "Hugging Face"]]) {
     const line = el("div", "abmd-keyrow"), field = input(keyHint(id), "", "password");
     field.autocomplete = "off";
-    line.append(el("span", "abmd-caption", label), field, action("Save", `Save the ${label} key on this machine`, async () => {
+    line.append(el("span", "abmd-label", label), field, action("Save", `Save the ${label} key on this machine`, async () => {
       if (!field.value) return;
       const info = await request("/keys", {[id]: field.value.trim()}); takeKeys(info); field.value = ""; field.placeholder = keyHint(id);
       showToast({detail: `${label} key saved on this machine.`});
@@ -294,23 +410,46 @@ function build(node) {
       const url = URL.createObjectURL(blob), anchor = el("a"); anchor.href = url; anchor.download = "models.json"; anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
     }));
   presetBody.append(presetSelect, presetName, presetTools, fileInput);
-  root.append(toolbar, list, footer, keys, presets);
+  root.append(toolbar, listBox, footer, keys, presets);
   root.addEventListener("pointerdown", event => event.stopPropagation());
-  root.addEventListener("keydown", event => event.stopPropagation());
-  // The base pack handles these panels when installed. Standalone preview fallback.
+  // Keys typed into a control stay in it. With only the panel itself focused (see below) they go on to ComfyUI.
+  root.addEventListener("keydown", event => {if (event.target !== root) event.stopPropagation();});
+  // Nodes 2.0 hands every wheel turn over a node to the graph, except over a box marked to keep
+  // the wheel that also holds the keyboard focus. So there the panel takes the focus while the
+  // pointer is over it, and gives it back when the pointer leaves. Typing elsewhere is left alone.
+  root.dataset.captureWheel = "true"; root.tabIndex = -1;
+  let focusBefore = null;
+  root.addEventListener("pointermove", () => {
+    const active = document.activeElement;
+    if (root.contains(active) || !root.closest("[data-node-id]") || active?.matches?.("input,textarea,select,[contenteditable]")) return;
+    focusBefore = active; root.focus({preventScroll: true});
+  });
+  root.addEventListener("pointerleave", () => {
+    if (document.activeElement !== root) return;
+    if (focusBefore?.isConnected && focusBefore !== document.body) focusBefore.focus({preventScroll: true}); else root.blur();
+    focusBefore = null;
+  });
   root.addEventListener("wheel", event => {
-    if (app.extensions?.some(e => e.name === "AusBoss.CanvasPassthrough")) return;
-    if (panelKeepsWheel(event.target, event, {root, host: root, styleOf: e => getComputedStyle(e), activeElement: document.activeElement})) return;
+    if (event.defaultPrevented) return;
+    if (wheelScrollsList(event, list)) {
+      // The wheel stays with the list anywhere on this node, so it never zooms halfway down a list.
+      event.stopPropagation();
+      if (!list.contains(event.target)) {event.preventDefault(); list.scrollTop += wheelPixels(event, list.clientHeight);}
+      return;
+    }
+    // Nothing to scroll: the graph zooms, as it does over the rest of a node.
+    if (panelKeepsWheel(event.target, event, {root, host: root, styleOf: e => getComputedStyle(e)})) return;
     event.preventDefault(); event.stopPropagation(); app.canvas?.processMouseWheel(event);
   }, {passive: false});
   const widget = node.addDOMWidget("ausboss_model_downloader_panel", "ausboss_model_downloader", root, {serialize: false, hideOnZoom: false});
   widget.serialize = false; keepDomWidgetWidthAuto(widget);
-  const minHeight = () => 400 + (keys.open ? 180 : 0) + (presets.open ? 150 : 0);
-  fillNodeHeight(widget, {minWidth: 530, minHeight, exactMinWidth: true, minNodeSize: [530, 440]});
+  // What the panel needs with three rows showing, plus each opened section.
+  const minHeight = () => 250 + WIDGET_FRAME + (keys.open ? 180 : 0) + (presets.open ? 150 : 0);
+  fillNodeHeight(widget, {minWidth: MIN_WIDTH, minHeight, exactMinWidth: true, minNodeSize: [MIN_WIDTH, 310]});
   for (const section of [keys, presets]) section.addEventListener("toggle", () => {
     node.setSize([node.size[0], Math.max(node.size[1], minHeight() + 40)]);
   });
-  applyBrandSurface(node); node.size = [600, 540];
+  applyBrandSurface(node); node.size = [660, 430];
   listeners.add(update);
   state.load = () => {try {rows = cleanList(node.properties[PROPERTY] || []);} catch {rows = [];}
     node.properties[PROPERTY] = rows.map(cleanRow); state.rows = rows; applyBrandSurface(node); render(); void checkAll();};
