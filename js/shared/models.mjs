@@ -52,3 +52,33 @@ export function statusText(job) {
   if (job.state === "downloading") return job.progress == null ? "Downloading…" : `${job.progress}% · ${sizeText(job.downloaded)}`;
   return {installed: "Installed", missing: "Missing", checking: "Checking…", queued: "Queued", auth_required: "Access key needed", cancelled: "Cancelled", error: "Retry"}[job.state] || "Not checked";
 }
+// The few words that fit the list's Status column; the size has a column of its own.
+export function rowStatus(job) {
+  if (job?.state === "downloading") return job.progress == null ? "Starting…" : `${job.progress}%`;
+  return {installed: "Installed", missing: "Missing", checking: "Checking…", queued: "Queued", auth_required: "Needs key", cancelled: "Cancelled", error: "Failed"}[job?.state] || "Not checked";
+}
+// Run fn on every item, at most `limit` at once, in list order.
+export async function eachAtOnce(items, limit, fn) {
+  let next = 0;
+  const worker = async () => { while (next < items.length) await fn(items[next++]); };
+  await Promise.all(Array.from({length: Math.min(limit, items.length)}, worker));
+}
+// Move one row to where it was dropped: before `to`, or after it when `after` is set.
+export function moveItem(list, from, to, after = false) {
+  if (from === to || from < 0 || to < 0 || from >= list.length || to >= list.length) return false;
+  const [item] = list.splice(from, 1);
+  let at = to > from ? to - 1 : to;
+  if (after) at += 1;
+  list.splice(at, 0, item);
+  return true;
+}
+// Over the downloader the wheel scrolls the model list, at the list's top and bottom too.
+// The graph zooms only on a pinch (Ctrl + wheel) or when the list has nothing to scroll.
+export function wheelScrollsList(event, list) {
+  if (!list || event.ctrlKey || event.metaKey) return false;
+  return list.scrollHeight - list.clientHeight > 1;
+}
+// How far one wheel step moves the list: mice report pixels, lines or pages.
+export function wheelPixels(event, page) {
+  return event.deltaY * (event.deltaMode === 1 ? 40 : event.deltaMode === 2 ? page : 1);
+}

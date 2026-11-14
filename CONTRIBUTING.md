@@ -20,6 +20,13 @@ node --test tests/*.test.mjs
 node --check js/model_downloader/index.js
 ```
 
+Bandit is a useful extra check before a release:
+
+```bash
+python -m pip install bandit
+bandit -r __init__.py downloader -s B101,B112,B311
+```
+
 Tests use temporary directories and simulated provider responses. They do not need credentials or download model files.
 
 For frontend changes, check the actual ComfyUI canvas in Classic and Nodes 2.0: add a row, resize, save/reload, reorder, and check Workflow Note integration. Provider changes also need a small real public-model transfer into an isolated model folder.

@@ -132,13 +132,26 @@ class FakeResponse:
 
 
 class FakeClient:
-    def __init__(self, keys): pass
+    def __init__(self, keys, connections=None): pass
     async def __aenter__(self): return self
     async def __aexit__(self, *args): pass
     async def resolve(self, url):
         return {'files': [{'filename': 'model.safetensors', 'url': url, 'size': 11,
                            'sha256': hashlib.sha256(b'model-bytes').hexdigest(), 'provider': 'huggingface'}]}
     async def response(self, url, provider): return FakeResponse()
+
+
+class GatedClient(FakeClient):
+    """Every transfer stops at the provider until the test opens the gate."""
+    gate, reached = None, []
+    async def resolve(self, url):
+        data = await super().resolve(url)
+        data['files'][0]['filename'] = url.rsplit('/', 1)[1]
+        return data
+    async def response(self, url, provider):
+        self.reached.append(url)
+        await self.gate.wait()
+        return FakeResponse()
 
 
 class ServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -164,6 +177,65 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(target.stat().st_mode & 0o777, model_mode())
         self.assertFalse(list(self.models.rglob('*.part')))
         self.assertEqual((await self.service.check('user', self.row))['state'], 'installed')
+
+    def gated(self):
+        GatedClient.gate, GatedClient.reached = asyncio.Event(), []
+        return patch('downloader.service.ProviderClient', GatedClient)
+
+    def numbered(self, count):
+        return [dict(self.row, url=self.row['url'].replace('model.', f'model{n}.'), filename=f'model{n}.safetensors')
+                for n in range(count)]
+
+    async def settle(self):
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    async def test_three_transfers_run_together_and_the_rest_wait(self):
+        with self.gated():
+            jobs = [self.service.start('user', row) for row in self.numbered(5)]
+            await self.settle()
+            states = [self.service.status('user', job['id'])['state'] for job in jobs]
+            self.assertEqual(states, ['downloading'] * 3 + ['queued'] * 2)
+            self.assertEqual(len(GatedClient.reached), 3)
+            GatedClient.gate.set()
+            results = [await self.finish(job) for job in jobs]
+        self.assertEqual([r['state'] for r in results], ['installed'] * 5, results)
+        self.assertEqual(sorted(p.name for p in (self.models / 'style').iterdir()),
+                         [f'model{n}.safetensors' for n in range(5)])
+
+    async def test_same_file_from_two_rows_transfers_once(self):
+        # A Workflow Note row and a list row can name one file in different words.
+        with self.gated():
+            named = self.service.start('user', self.row)
+            unnamed = self.service.start('user', dict(self.row, filename='', subfolder='other'))
+            self.assertNotEqual(named['id'], unnamed['id'])
+            await self.settle()
+            GatedClient.gate.set()
+            results = [await self.finish(named), await self.finish(unnamed)]
+        self.assertEqual(len(GatedClient.reached), 1)
+        self.assertEqual([r['message'] for r in results], ['Installed', 'Already installed'], results)
+        self.assertEqual(self.service.claims, {})
+
+    async def test_transfers_running_together_share_the_free_space(self):
+        room = type('Usage', (), {'free': 11 + 32 * 1024 * 1024 + 5})  # Room for one model, not two.
+        with self.gated(), patch('downloader.service.shutil.disk_usage', return_value=room):
+            first, second = [self.service.start('user', row) for row in self.numbered(2)]
+            await self.settle()
+            self.assertIn('not enough free disk space', self.service.status('user', second['id'])['message'])
+            GatedClient.gate.set()
+            self.assertEqual((await self.finish(first))['state'], 'installed')
+
+    async def test_cancel_while_waiting_frees_the_file_for_the_next_row(self):
+        with self.gated():
+            first = self.service.start('user', self.row)
+            second = self.service.start('user', dict(self.row, filename=''))
+            await self.settle()
+            self.service.cancel('user', first['id'])
+            GatedClient.gate.set()
+            results = [await self.finish(first), await self.finish(second)]
+        self.assertEqual([r['state'] for r in results], ['cancelled', 'installed'], results)
+        self.assertFalse(list(self.models.rglob('*.part')))
+        self.assertEqual(self.service.claims, {})
 
     async def test_existing_never_overwritten(self):
         (self.models / 'model.safetensors').write_bytes(b'original')
@@ -247,6 +319,55 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.active_keys()['huggingface'], 'saved-hf')
             self.assertEqual(store.key_sources()['huggingface'], 'saved')
         self.assertNotIn('env-hf', (self.root / 'settings').joinpath(store.root.name, 'keys.json').read_text())
+
+    async def test_missing_model_shows_its_size_and_download_reuses_the_lookup(self):
+        class Counting(FakeClient):
+            asked = 0
+            async def resolve(self, url):
+                Counting.asked += 1
+                return await super().resolve(url)
+        with patch('downloader.service.ProviderClient', Counting):
+            checked = await self.service.check('user', self.row)
+            self.assertEqual((checked['state'], checked['size']), ('missing', 11))
+            result = await self.finish(self.service.start('user', self.row))
+            self.assertEqual(result['state'], 'installed', result)
+            self.assertEqual(Counting.asked, 1)
+            # A new access key can open files the last lookup could not see.
+            self.service.forget('user')
+            await self.service.resolve('user', self.row['url'])
+            self.assertEqual(Counting.asked, 2)
+
+    async def test_size_lookup_reports_a_needed_key_and_nothing_else(self):
+        class Locked(FakeClient):
+            async def resolve(self, url): raise DownloadError('Access required.', 'auth_required')
+        class Offline(FakeClient):
+            async def resolve(self, url): raise OSError('network unreachable')
+        with patch('downloader.service.ProviderClient', Locked), self.assertRaises(DownloadError) as caught:
+            await self.service.check('user', self.row)
+        self.assertEqual(caught.exception.code, 'auth_required')
+        with patch('downloader.service.ProviderClient', Offline):
+            checked = await self.service.check('user', self.row)
+        self.assertEqual((checked['state'], checked['size']), ('missing', 0))
+        self.assertEqual(self.service.lookups, {})
+
+
+class ConnectionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transfers_share_one_session_without_cookies(self):
+        from aiohttp import DummyCookieJar
+        from downloader.providers import Connections
+        shared = Connections()
+        async with ProviderClient({'huggingface': 'a'}, shared) as first:
+            pass
+        self.assertFalse(first.session.closed)  # Leaving one client keeps the pool for the others.
+        async with ProviderClient({}, shared) as second:
+            self.assertIs(second.session, first.session)
+        self.assertIsInstance(first.session.cookie_jar, DummyCookieJar)
+        self.assertNotIn('Authorization', first.session.headers)
+        await shared.close()
+        self.assertTrue(first.session.closed)
+        async with ProviderClient({}) as alone:
+            pass
+        self.assertTrue(alone.session.closed)
 
 
 class CivitaiTests(unittest.IsolatedAsyncioTestCase):

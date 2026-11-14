@@ -1,15 +1,18 @@
-"""One background transfer at a time, with local credentials and atomic files."""
+"""A few background transfers at a time, with local credentials and atomic files."""
 import asyncio
+import contextlib
+import copy
 import hashlib
 import json
 import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 import uuid
 
 from .policy import DownloadError, clean_rows, contained, model_filename, source_url
-from .providers import ProviderClient
+from .providers import Connections, ProviderClient
 
 
 # Pod templates (RunPod and others) can hand secrets in as environment variables, so a
@@ -17,6 +20,8 @@ from .providers import ProviderClient
 ENV_KEYS = {'civitai': ('CIVITAI_API_KEY', 'CIVITAI_TOKEN', 'CIVITAI_API_TOKEN'),
             'huggingface': ('HF_TOKEN', 'HUGGING_FACE_HUB_TOKEN')}
 WRITE_BLOCK = 8 * 1024 * 1024
+AT_ONCE = 3  # Transfers that run together; the rest wait their turn in the order they were started.
+LOOKUP_SECONDS = 600  # How long a link's file list is reused, so a check and its download ask once.
 
 
 def valid_key(value):
@@ -118,16 +123,36 @@ def install(partial, target):
 class DownloadService:
     def __init__(self, folders, storage):
         self.folders, self.storage = folders, Path(storage)
-        self.jobs, self.tasks = {}, {}
-        self.slot = asyncio.Semaphore(1)
+        self.jobs, self.tasks, self.claims, self.lookups = {}, {}, {}, {}
+        self.slot = asyncio.Semaphore(AT_ONCE)
+        self.connections = Connections()
 
     def store(self, user):
         # A user id never becomes a filesystem path.
         return LocalStore(self.storage / hashlib.sha256(user.encode()).hexdigest())
 
+    def client(self, user):
+        return ProviderClient(self.store(user).active_keys(), self.connections)
+
     async def resolve(self, user, url):
-        async with ProviderClient(self.store(user).active_keys()) as client:
-            return await client.resolve(url)
+        key, now = (user, url), time.monotonic()
+        cached = self.lookups.get(key)
+        if cached and now - cached[0] < LOOKUP_SECONDS:
+            return copy.deepcopy(cached[1])
+        async with self.client(user) as client:
+            data = await client.resolve(url)
+        # Only answers are kept, never failures: a key added a moment later must be tried.
+        for old in [k for k, (at, _) in self.lookups.items() if now - at >= LOOKUP_SECONDS][:64]:
+            del self.lookups[old]
+        if len(self.lookups) >= 256:
+            del self.lookups[next(iter(self.lookups))]
+        self.lookups[key] = (now, copy.deepcopy(data))
+        return data
+
+    def forget(self, user):
+        """A changed access key can open files the last lookup could not see."""
+        for key in [k for k in self.lookups if k[0] == user]:
+            del self.lookups[key]
 
     async def select(self, user, row):
         data = await self.resolve(user, row.get('selected_url') or row.get('url', ''))
@@ -151,15 +176,33 @@ class DownloadService:
         source_url(row.get('selected_url') or row.get('url', ''))
         folder, subfolder = row.get('folder', ''), row.get('subfolder', '')
         self.folders.roots(folder)
-        filename = row.get('filename', '')
+        filename, info = row.get('filename', ''), None
         if not filename:
-            filename = (await self.select(user, row))['filename']
+            info = await self.select(user, row)
+            filename = info['filename']
         # Look before validating the write path: a linked model is installed, not an error.
         existing = await asyncio.to_thread(self.folders.existing, folder, subfolder, filename)
-        if not existing:
-            self.folders.target(folder, subfolder, filename)
-        return {'state': 'installed' if existing else 'missing', 'filename': filename,
-                'path': existing[1] if existing else '', 'size': existing[0].stat().st_size if existing else 0}
+        if existing:
+            return {'state': 'installed', 'filename': filename, 'path': existing[1], 'size': existing[0].stat().st_size}
+        self.folders.target(folder, subfolder, filename)
+        if info is None:
+            info = await self.size_of(user, row)
+        return {'state': 'missing', 'filename': filename, 'path': '', 'size': (info or {}).get('size', 0)}
+
+    async def size_of(self, user, row):
+        """How big a missing model is, so the list shows what a download will take.
+
+        Only a needed access key is worth reporting before Download is clicked; any other
+        problem (offline, a renamed file) shows up when the download starts.
+        """
+        try:
+            return await self.select(user, row)
+        except DownloadError as exc:
+            if exc.code == 'auth_required':
+                raise
+            return None
+        except Exception:
+            return None
 
     def start(self, user, row):
         row = clean_rows([row])[0]
@@ -202,13 +245,35 @@ class DownloadService:
             self.jobs[identifier].update(state='cancelled', message='Cancelled')
             self.tasks[identifier].cancel()
 
+    @contextlib.asynccontextmanager
+    async def claimed(self, key):
+        """One transfer per model name in a folder type, which is how a model counts as installed.
+
+        A second transfer of the same name waits, then finds the model installed.
+        """
+        entry = self.claims.setdefault(key, [asyncio.Lock(), 0])
+        entry[1] += 1
+        try:
+            async with entry[0]:
+                yield
+        finally:
+            entry[1] -= 1
+            if not entry[1]:
+                self.claims.pop(key, None)
+
+    def owed(self, job):
+        """Bytes the other running transfers still have to write to the same disk."""
+        return sum(max(0, other['_need'] - other['downloaded']) for other in self.jobs.values()
+                   if other is not job and other['state'] == 'downloading' and other.get('_disk') == job['_disk'])
+
     async def run(self, user, row, job):
         partial = None
         try:
-            async with self.slot:
+            async with self.slot, contextlib.AsyncExitStack() as held:
                 job.update(state='downloading', message='Checking model')
                 info = await self.select(user, row)
                 filename = info['filename']
+                await held.enter_async_context(self.claimed((row['folder'], filename)))
                 found = await asyncio.to_thread(self.folders.existing, row['folder'], row['subfolder'], filename)
                 if found:
                     # Presence is filename-based; never overwrite an existing model.
@@ -218,12 +283,14 @@ class DownloadService:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if not contained(root, target):
                     raise DownloadError('The destination leaves the registered model folder.')
-                free = shutil.disk_usage(target.parent).free
+                # Transfers that run together share the disk: count what the others still need.
+                job.update(_disk=os.stat(target.parent).st_dev, _need=info['size'])
+                free = shutil.disk_usage(target.parent).free - self.owed(job)
                 if info['size'] + 32 * 1024 * 1024 > free:
                     raise DownloadError('There is not enough free disk space for this model.')
                 partial = target.with_name('.' + filename + '.' + job['id'] + '.part')
                 digest = hashlib.sha256()
-                async with ProviderClient(self.store(user).active_keys()) as client:
+                async with self.client(user) as client:
                     response = await client.response(info['url'], info['provider'])
                     try:
                         if any(t in response.headers.get('Content-Type', '').lower() for t in ('text/html', 'application/json')):
@@ -232,7 +299,7 @@ class DownloadService:
                         total = content_length or info['size']
                         if total + 32 * 1024 * 1024 > free:
                             raise DownloadError('There is not enough free disk space for this model.')
-                        job.update(filename=filename, total=total, message='Downloading')
+                        job.update(filename=filename, total=total, _need=total, message='Downloading')
                         fd = os.open(partial, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, 'O_NOFOLLOW', 0), 0o644)
                         with os.fdopen(fd, 'wb') as handle:
                             def flush(block):
