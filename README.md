@@ -15,7 +15,7 @@ This is a separate addon for [ComfyUI-AusBoss](https://github.com/ausboss/ComfyU
 
 <p align="center"><img src="docs/images/model-downloader.png" width="630" alt="Model Downloader listing seven models, one per row: name, folder, status, size and one button. Three are downloading, one is installed, one is waiting and one needs an access key"></p>
 
-**Version 0.2.1.** Works behind a proxy such as RunPod, counts linked model files as installed, reads `HF_TOKEN` and `CIVITAI_API_KEY` from the environment when no key is saved, and **From workflow** also collects the model links on loader nodes. Tested with real downloads on Linux in both Classic and Nodes 2.0. Registry availability depends on review; the Git and ZIP installation methods below work independently. The Registry package ID is `ausboss-model-downloader`.
+**Version 0.3.0.** Downloads up to three files at the same time, and the list is now a table: one model per row with its folder, status, size and one button. Click a name to open that row's link, file and subfolder. The node follows the main pack's look, and after an update a normal browser refresh loads the new version. Tested with real downloads on Linux in both Classic and Nodes 2.0. Registry availability depends on review; the Git and ZIP installation methods below work independently. The Registry package ID is `ausboss-model-downloader`.
 
 ## What it does
 

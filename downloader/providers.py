@@ -26,7 +26,7 @@ def open_session():
         timeout=ClientTimeout(total=None, connect=20, sock_read=60),
         # No cookie jar: one session serves every ComfyUI user, so nothing a site sets carries over.
         cookie_jar=DummyCookieJar(), trust_env=False, auto_decompress=False,
-        headers={'User-Agent': 'AusBoss-Model-Downloader/0.2', 'Accept-Encoding': 'identity'},
+        headers={'User-Agent': 'AusBoss-Model-Downloader/0.3', 'Accept-Encoding': 'identity'},
     )
 
 
