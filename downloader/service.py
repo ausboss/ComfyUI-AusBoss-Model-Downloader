@@ -15,10 +15,7 @@ from .policy import DownloadError, clean_rows, contained, model_filename, source
 from .providers import Connections, ProviderClient
 
 
-# Pod templates (RunPod and others) can hand secrets in as environment variables, so a
-# key set once on the template works on every fresh pod. A key saved in the node wins.
-ENV_KEYS = {'civitai': ('CIVITAI_API_KEY', 'CIVITAI_TOKEN', 'CIVITAI_API_TOKEN'),
-            'huggingface': ('HF_TOKEN', 'HUGGING_FACE_HUB_TOKEN')}
+PROVIDERS = ('civitai', 'huggingface')
 WRITE_BLOCK = 8 * 1024 * 1024
 AT_ONCE = 3  # Transfers that run together; the rest wait their turn in the order they were started.
 LOOKUP_SECONDS = 600  # How long a link's file list is reused, so a check and its download ask once.
@@ -26,14 +23,6 @@ LOOKUP_SECONDS = 600  # How long a link's file list is reused, so a check and it
 
 def valid_key(value):
     return isinstance(value, str) and len(value) <= 1024 and not any(ord(c) < 33 or ord(c) > 126 for c in value)
-
-
-def env_key(provider):
-    for name in ENV_KEYS[provider]:
-        value = os.environ.get(name, '').strip()
-        if value and valid_key(value):
-            return value
-    return ''
 
 
 class LocalStore:
@@ -67,19 +56,15 @@ class LocalStore:
 
     def active_keys(self):
         saved = self.keys()
-        return {k: saved.get(k) or env_key(k) for k in ENV_KEYS}
+        return {k: saved.get(k) or '' for k in PROVIDERS}
 
     def key_status(self):
         keys = self.keys()
-        return {k: bool(keys.get(k)) for k in ENV_KEYS}
-
-    def key_sources(self):
-        keys = self.keys()
-        return {k: 'saved' if keys.get(k) else 'environment' if env_key(k) else '' for k in ENV_KEYS}
+        return {k: bool(keys.get(k)) for k in PROVIDERS}
 
     def save_keys(self, data):
         keys = self.keys()
-        for k in ('civitai', 'huggingface'):
+        for k in PROVIDERS:
             if k in data:
                 value = data[k]
                 if not valid_key(value):

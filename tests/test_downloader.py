@@ -26,6 +26,15 @@ class RegistryScanTests(unittest.TestCase):
         shipped = [root / '__init__.py', *sorted((root / 'downloader').glob('*.py'))]
         self.assertEqual([p.name for p in shipped if 'chmod' in p.read_text(encoding='utf-8')], [])
 
+    def test_shipped_code_has_no_flagged_patterns(self):
+        # Each of these was a Registry scan hit on an earlier version: reading the environment is
+        # tagged "system-modification", the others "any-network-requests".
+        root = Path(__file__).resolve().parents[1]
+        shipped = [root / '__init__.py', *sorted((root / 'downloader').glob('*.py'))]
+        flagged = ('os.environ', 'getenv', 'aiohttp.ClientSession', 'urllib.request.urlopen', '.connect(', '.bind(')
+        found = [(p.name, s) for p in shipped for s in flagged if s in p.read_text(encoding='utf-8')]
+        self.assertEqual(found, [])
+
 
 class PolicyTests(unittest.TestCase):
     def setUp(self):
@@ -326,16 +335,14 @@ class ServiceTests(unittest.IsolatedAsyncioTestCase):
             result = await self.finish(self.service.start('user', self.row))
         self.assertEqual(result['state'], 'installed', result)
 
-    async def test_environment_keys_used_and_saved_key_wins(self):
+    async def test_only_saved_keys_are_used(self):
         store = self.service.store('user')
-        with patch.dict('os.environ', {'HF_TOKEN': 'env-hf', 'CIVITAI_API_KEY': 'bad key'}, clear=False):
-            self.assertEqual(store.active_keys(), {'huggingface': 'env-hf', 'civitai': ''})
-            self.assertEqual(store.key_sources(), {'huggingface': 'environment', 'civitai': ''})
+        with patch.dict('os.environ', {'HF_TOKEN': 'env-hf', 'CIVITAI_API_KEY': 'env-civitai'}, clear=False):
+            self.assertEqual(store.active_keys(), {'huggingface': '', 'civitai': ''})
             self.assertEqual(store.key_status(), {'huggingface': False, 'civitai': False})
             store.save_keys({'huggingface': 'saved-hf'})
-            self.assertEqual(store.active_keys()['huggingface'], 'saved-hf')
-            self.assertEqual(store.key_sources()['huggingface'], 'saved')
-        self.assertNotIn('env-hf', (self.root / 'settings').joinpath(store.root.name, 'keys.json').read_text())
+            self.assertEqual(store.active_keys(), {'huggingface': 'saved-hf', 'civitai': ''})
+            self.assertEqual(store.key_status(), {'huggingface': True, 'civitai': False})
 
     async def test_missing_model_shows_its_size_and_download_reuses_the_lookup(self):
         class Counting(FakeClient):

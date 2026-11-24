@@ -15,7 +15,7 @@ This is a separate addon for [ComfyUI-AusBoss](https://github.com/ausboss/ComfyU
 
 <p align="center"><img src="docs/images/model-downloader.png" width="630" alt="Model Downloader listing seven models, one per row: name, folder, status, size and one button. Three are downloading, one is installed, one is waiting and one needs an access key"></p>
 
-**Version 0.3.0.** Downloads up to three files at the same time, and the list is now a table: one model per row with its folder, status, size and one button. Click a name to open that row's link, file and subfolder. The node follows the main pack's look, and after an update a normal browser refresh loads the new version. Tested with real downloads on Linux in both Classic and Nodes 2.0. Registry availability depends on review; the Git and ZIP installation methods below work independently. The Registry package ID is `ausboss-model-downloader`.
+**Version 0.3.1.** Downloads up to three files at the same time, and the list is now a table: one model per row with its folder, status, size and one button. Click a name to open that row's link, file and subfolder. The node follows the main pack's look, and after an update a normal browser refresh loads the new version. Access keys now come only from **Access keys** in the node: `HF_TOKEN` and `CIVITAI_API_KEY` environment variables are no longer read. Tested with real downloads on Linux in both Classic and Nodes 2.0. Registry availability depends on review; the Git and ZIP installation methods below work independently. The Registry package ID is `ausboss-model-downloader`.
 
 ## What it does
 
@@ -107,7 +107,7 @@ Open **Access keys** to enter a Civitai API key or Hugging Face token. Click **S
 - Keys are stored locally under ComfyUI's protected user-data directory, separately for each ComfyUI user profile.
 - Keys are never included in workflow files, exported lists, or API responses. The UI only reports whether a key is saved.
 - Each provider receives only its own key. Authorization is not forwarded to storage redirects.
-- Enter keys again on a new machine or pod; use the **Clear** buttons to remove saved keys.
+- Enter keys again on a new machine or pod; use the **Clear** buttons to remove saved keys. Environment variables such as `HF_TOKEN` or `CIVITAI_API_KEY` are not read, so a key set in a pod template does nothing here. To keep keys across pods, put ComfyUI's `user` folder on the pod's persistent volume: saved keys live under `user/__ausboss_model_downloader`.
 
 **Saved model lists** contains named presets and JSON import/export. Import replaces the node's current list. Export includes model links and destination settings only.
 

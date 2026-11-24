@@ -56,14 +56,13 @@ def register():
     @route('get', '/info')
     async def info(user, data, request):
         store = service.store(user)
-        return {'folders': service.folders.names(), 'keys': store.key_status(), 'key_sources': store.key_sources(), 'version': 1}
+        return {'folders': service.folders.names(), 'keys': store.key_status(), 'version': 1}
 
     @route('post', '/keys')
     async def keys(user, data, request):
-        store = service.store(user)
-        saved = store.save_keys(data)
+        saved = service.store(user).save_keys(data)
         service.forget(user)
-        return {'keys': saved, 'key_sources': store.key_sources()}
+        return {'keys': saved}
 
     @route('post', '/resolve')
     async def resolve(user, data, request):
