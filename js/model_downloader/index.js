@@ -16,7 +16,7 @@ const ROW_DRAG = "application/x-ausboss-model-row";
 // The narrowest the node goes: every column still shows, and a name keeps room to be read.
 const MIN_WIDTH = 600;
 const jobs = new Map(), sizes = new Map(), listeners = new Set();
-let folders = [], keyStatus = {}, keySources = {}, timer = null, polling = false;
+let folders = [], keyStatus = {}, timer = null, polling = false;
 const emit = () => { for (const fn of listeners) fn(); };
 const recentToasts = new Map();
 const fail = (error) => {
@@ -42,7 +42,7 @@ async function request(path, body) {
   if (!response.ok || result.error) throw Object.assign(new Error(result.error || "The request failed."), {state: result.state});
   return result;
 }
-function takeKeys(info) { keyStatus = info.keys || {}; keySources = info.key_sources || {}; }
+function takeKeys(info) { keyStatus = info.keys || {}; }
 const infoReady = request("/info").then(info => { folders = info.folders; takeKeys(info); }).catch(fail);
 function schedulePoll() {
   if (!timer && !polling && [...jobs.values()].some(activeJob)) timer = setTimeout(poll, 800);
@@ -378,9 +378,8 @@ function build(node) {
       for (const row of wanted) if (!["installed", "auth_required"].includes(jobs.get(rowKey(row))?.state)) await download(row);
     }, "primary", "download"));
   const keys = el("details"), keyBody = el("div", "abmd-fold"); keys.append(el("summary", "", "Access keys"), keyBody);
-  keyBody.append(el("div", "abmd-hint", "Saved on this machine. Never included in workflows or model lists. On a pod, set HF_TOKEN or CIVITAI_API_KEY in the template and every new pod has them."));
-  const keyHint = (id) => keySources[id] === "saved" || (!keySources[id] && keyStatus[id]) ? "Saved · enter to replace"
-    : keySources[id] === "environment" ? "Using the pod's environment key · enter to override" : "Access key";
+  keyBody.append(el("div", "abmd-hint", "Saved on this machine. Never included in workflows or model lists. On a new pod, enter and save them here once."));
+  const keyHint = (id) => keyStatus[id] ? "Saved · enter to replace" : "Access key";
   for (const [id, label] of [["civitai", "Civitai"], ["huggingface", "Hugging Face"]]) {
     const line = el("div", "abmd-keyrow"), field = input(keyHint(id), "", "password");
     field.autocomplete = "off";
